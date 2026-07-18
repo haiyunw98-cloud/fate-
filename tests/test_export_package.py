@@ -32,6 +32,16 @@ EXPECTED_KEYS = {
     "media_manifest",
     "validation_report",
 }
+EXPECTED_MANAGED_FILES = sorted(
+    [
+        "media-manifest.json",
+        "project.md",
+        "shots.xlsx",
+        "validation-report.txt",
+        "video-prompts.txt",
+    ]
+)
+MARKER_NAME = ".novel-to-ai-drama-pack-export.json"
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
@@ -603,7 +613,6 @@ def test_managed_export_is_replaced_at_same_destination(
 ) -> None:
     destination = tmp_path / "export"
     first = export_package(project_path, destination)
-    (destination / "obsolete.txt").write_text("old", encoding="utf-8")
     valid_project["analysis"]["world_bible"] = "新世界观"
     project_path.write_text(
         json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
@@ -613,8 +622,180 @@ def test_managed_export_is_replaced_at_same_destination(
 
     assert all(path.parent == destination for path in second.values())
     assert "新世界观" in second["project_md"].read_text(encoding="utf-8")
-    assert not (destination / "obsolete.txt").exists()
     assert first["project_md"] == second["project_md"]
+
+
+def test_managed_marker_binds_project_and_exact_file_whitelist(
+    project_path: Path, tmp_path: Path
+) -> None:
+    outputs = export_package(project_path, tmp_path / "export")
+    marker = json.loads(
+        (outputs["project_md"].parent / MARKER_NAME).read_text(encoding="utf-8")
+    )
+
+    assert marker == {
+        "export_format": "novel-to-ai-drama-pack",
+        "format_version": 1,
+        "managed_files": EXPECTED_MANAGED_FILES,
+        "project_id": "PRJ001",
+    }
+
+
+def test_old_static_marker_cannot_authorize_replacement(
+    project_path: Path, tmp_path: Path
+) -> None:
+    destination = tmp_path / "export"
+    destination.mkdir()
+    for name in EXPECTED_MANAGED_FILES:
+        (destination / name).write_bytes(f"user:{name}".encode("utf-8"))
+    (destination / MARKER_NAME).write_text(
+        json.dumps(
+            {
+                "export_format": "novel-to-ai-drama-pack",
+                "format_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = {path.name: path.read_bytes() for path in destination.iterdir()}
+
+    outputs = export_package(project_path, destination)
+
+    assert outputs["project_md"].parent == tmp_path / "export-v001"
+    assert {path.name: path.read_bytes() for path in destination.iterdir()} == before
+
+
+def test_marker_for_different_project_cannot_authorize_replacement(
+    project_path: Path, tmp_path: Path
+) -> None:
+    destination = tmp_path / "export"
+    export_package(project_path, destination)
+    marker_path = destination / MARKER_NAME
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["project_id"] = "PRJ999"
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in destination.iterdir()}
+
+    outputs = export_package(project_path, destination)
+
+    assert outputs["project_md"].parent == tmp_path / "export-v001"
+    assert {path.name: path.read_bytes() for path in destination.iterdir()} == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "extra",
+        "directory",
+        "symlink",
+        "marker_directory",
+        "marker_symlink",
+    ],
+)
+def test_nonexact_managed_directory_is_preserved_and_uses_sibling(
+    project_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    destination = tmp_path / "export"
+    export_package(project_path, destination)
+    target = destination / "project.md"
+    if mutation == "missing":
+        target.unlink()
+    elif mutation == "extra":
+        (destination / "user-sentinel.txt").write_text("keep", encoding="utf-8")
+    elif mutation == "directory":
+        target.unlink()
+        target.mkdir()
+    elif mutation == "symlink":
+        outside = tmp_path / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        target.unlink()
+        target.symlink_to(outside)
+    elif mutation == "marker_directory":
+        marker = destination / MARKER_NAME
+        marker.unlink()
+        marker.mkdir()
+    else:
+        outside = tmp_path / "outside-marker.json"
+        outside.write_text("{}", encoding="utf-8")
+        marker = destination / MARKER_NAME
+        marker.unlink()
+        marker.symlink_to(outside)
+    before_names = sorted(path.name for path in destination.iterdir())
+    sentinel_bytes = {
+        path.name: path.read_bytes()
+        for path in destination.iterdir()
+        if path.is_file() and not path.is_symlink()
+    }
+
+    outputs = export_package(project_path, destination)
+
+    assert outputs["project_md"].parent == tmp_path / "export-v001"
+    assert sorted(path.name for path in destination.iterdir()) == before_names
+    assert {
+        path.name: path.read_bytes()
+        for path in destination.iterdir()
+        if path.is_file() and not path.is_symlink()
+    } == sentinel_bytes
+
+
+def test_unknown_injected_after_backup_rename_is_restored_and_published_to_sibling(
+    project_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "export"
+    export_package(project_path, destination)
+    real_replace = exporter.os.replace
+    injected = False
+
+    def injecting_replace(source: object, target: object) -> None:
+        nonlocal injected
+        real_replace(source, target)
+        source_path = Path(source)
+        target_path = Path(target)
+        if source_path == destination and ".backup-" in target_path.name:
+            (target_path / "user-after-rename.txt").write_text(
+                "keep", encoding="utf-8"
+            )
+            injected = True
+
+    monkeypatch.setattr(exporter.os, "replace", injecting_replace)
+
+    outputs = export_package(project_path, destination)
+
+    assert injected
+    assert (destination / "user-after-rename.txt").read_text(encoding="utf-8") == "keep"
+    assert outputs["project_md"].parent == tmp_path / "export-v001"
+
+
+def test_cleanup_probe_never_deletes_unknown_backup_member(
+    project_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "export"
+    export_package(project_path, destination)
+    real_cleanup = exporter._remove_strict_managed_export
+    injected_paths: list[Path] = []
+
+    def injecting_cleanup(path: Path, project_id: str) -> None:
+        sentinel = path / "user-during-cleanup.txt"
+        sentinel.write_text("keep", encoding="utf-8")
+        injected_paths.append(sentinel)
+        real_cleanup(path, project_id)
+
+    monkeypatch.setattr(exporter, "_remove_strict_managed_export", injecting_cleanup)
+
+    with pytest.raises(ExportError, match="unknown export contents"):
+        export_package(project_path, destination)
+
+    assert injected_paths
+    assert injected_paths[0].read_text(encoding="utf-8") == "keep"
+    assert destination.is_dir()
 
 
 def test_unknown_existing_directory_gets_versioned_sibling(

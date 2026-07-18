@@ -32,7 +32,7 @@ class _UnsafeMediaPlatformError(RuntimeError):
 
 
 _MARKER_NAME = ".novel-to-ai-drama-pack-export.json"
-_MARKER = {
+_MARKER_BASE = {
     "export_format": "novel-to-ai-drama-pack",
     "format_version": 1,
 }
@@ -44,6 +44,7 @@ _OUTPUT_NAMES = {
     "media_manifest": "media-manifest.json",
     "validation_report": "validation-report.txt",
 }
+_MANAGED_FILES = tuple(sorted(_OUTPUT_NAMES.values()))
 def _single_line(value: object) -> str:
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
 
@@ -609,8 +610,16 @@ def _write_all(data: dict[str, Any], stage: Path) -> dict[str, Path]:
     _write_text(outputs["prompts"], _prompts_text(data))
     _write_json(outputs["media_manifest"], _manifest(data))
     _write_text(outputs["validation_report"], _validation_report(warnings))
-    _write_json(stage / _MARKER_NAME, _MARKER)
+    _write_json(stage / _MARKER_NAME, _expected_marker(data["project"]["project_id"]))
     return outputs
+
+
+def _expected_marker(project_id: str) -> dict[str, Any]:
+    return {
+        **_MARKER_BASE,
+        "managed_files": list(_MANAGED_FILES),
+        "project_id": project_id,
+    }
 
 
 def _path_contains(parent: Path, child: Path) -> bool:
@@ -657,16 +666,56 @@ def _prepare_paths(project_path: Path, output_dir: Path) -> tuple[Path, Path]:
     return source, requested
 
 
-def _is_managed_export(path: Path) -> bool:
-    if not path.is_dir() or path.is_symlink():
+def _read_regular_marker(path: Path) -> dict[str, Any] | None:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_size > 64 * 1024:
+            return None
+        payload = b""
+        while chunk := os.read(descriptor, 4096):
+            payload += chunk
+            if len(payload) > 64 * 1024:
+                return None
+        parsed = json.loads(payload.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, NotImplementedError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _is_managed_export(path: Path, project_id: str) -> bool:
+    try:
+        directory_status = path.lstat()
+    except OSError:
         return False
-    marker = path / _MARKER_NAME
-    if not marker.is_file() or marker.is_symlink():
+    if stat.S_ISLNK(directory_status.st_mode) or not stat.S_ISDIR(
+        directory_status.st_mode
+    ):
         return False
     try:
-        return json.loads(marker.read_text(encoding="utf-8")) == _MARKER
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        members = {member.name: member for member in path.iterdir()}
+    except OSError:
         return False
+    expected_names = {*_MANAGED_FILES, _MARKER_NAME}
+    if set(members) != expected_names:
+        return False
+    for name in expected_names:
+        try:
+            member_status = members[name].lstat()
+        except OSError:
+            return False
+        if stat.S_ISLNK(member_status.st_mode) or not stat.S_ISREG(
+            member_status.st_mode
+        ):
+            return False
+    return _read_regular_marker(path / _MARKER_NAME) == _expected_marker(project_id)
 
 
 def _versioned_sibling(requested: Path) -> Path:
@@ -686,24 +735,69 @@ def _safe_remove_created_directory(path: Path, parent: Path, prefix: str) -> Non
         shutil.rmtree(path)
 
 
-def _publish_new(stage: Path, target: Path) -> Path:
+def _remove_strict_managed_export(path: Path, project_id: str) -> None:
+    """Delete only an exact managed whitelist; preserve every unknown member."""
+    if not _is_managed_export(path, project_id):
+        raise ExportError(
+            f"refusing cleanup because unknown export contents are present: {path}"
+        )
+    for name in (*_MANAGED_FILES, _MARKER_NAME):
+        member = path / name
+        try:
+            member_status = member.lstat()
+        except OSError as error:
+            raise ExportError(
+                f"refusing cleanup because unknown export contents are present: {path}"
+            ) from error
+        if stat.S_ISLNK(member_status.st_mode) or not stat.S_ISREG(
+            member_status.st_mode
+        ):
+            raise ExportError(
+                f"refusing cleanup because unknown export contents are present: {path}"
+            )
+        member.unlink()
+    try:
+        path.rmdir()
+    except OSError as error:
+        raise ExportError(
+            f"backup cleanup found unknown export contents and preserved them: {path}"
+        ) from error
+
+
+def _publish_new(stage: Path, target: Path, project_id: str) -> Path:
     if target.exists() or target.is_symlink():
         target = _versioned_sibling(target)
     os.replace(stage, target)
     try:
         _fsync_directory(target.parent)
     except BaseException:
-        _safe_remove_created_directory(target, target.parent, target.name)
+        _remove_strict_managed_export(target, project_id)
         raise
     return target
 
 
-def _publish_managed(stage: Path, destination: Path) -> Path:
+def _publish_managed(stage: Path, destination: Path, project_id: str) -> Path:
     parent = destination.parent
+    if not _is_managed_export(destination, project_id):
+        return _publish_new(stage, _versioned_sibling(destination), project_id)
     backup = parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
     if backup.exists() or backup.is_symlink():
         raise ExportError(f"cannot allocate managed export backup: {backup}")
     os.replace(destination, backup)
+    if not _is_managed_export(backup, project_id):
+        try:
+            if destination.exists() or destination.is_symlink():
+                raise ExportError(
+                    "cannot restore export changed during managed backup verification"
+                )
+            os.replace(backup, destination)
+            _fsync_directory(parent)
+        except BaseException as restore_error:
+            raise ExportError(
+                "managed export changed during rename and could not be restored: "
+                + _single_line(restore_error)
+            ) from restore_error
+        return _publish_new(stage, _versioned_sibling(destination), project_id)
     stage_published = False
     try:
         os.replace(stage, destination)
@@ -712,7 +806,7 @@ def _publish_managed(stage: Path, destination: Path) -> Path:
     except BaseException:
         try:
             if stage_published:
-                _safe_remove_created_directory(destination, parent, destination.name)
+                _remove_strict_managed_export(destination, project_id)
             os.replace(backup, destination)
             _fsync_directory(parent)
         except BaseException as restore_error:
@@ -721,19 +815,19 @@ def _publish_managed(stage: Path, destination: Path) -> Path:
                 + _single_line(restore_error)
             )
         raise
-    _safe_remove_created_directory(backup, parent, f".{destination.name}.backup-")
+    _remove_strict_managed_export(backup, project_id)
     _fsync_directory(parent)
     return destination
 
 
-def _publish_atomically(stage: Path, requested: Path) -> Path:
+def _publish_atomically(stage: Path, requested: Path, project_id: str) -> Path:
     if requested.is_symlink():
         raise ExportError(f"output destination is a symbolic link: {requested}")
     if requested.exists():
-        if _is_managed_export(requested):
-            return _publish_managed(stage, requested)
-        return _publish_new(stage, _versioned_sibling(requested))
-    return _publish_new(stage, requested)
+        if _is_managed_export(requested, project_id):
+            return _publish_managed(stage, requested, project_id)
+        return _publish_new(stage, _versioned_sibling(requested), project_id)
+    return _publish_new(stage, requested, project_id)
 
 
 def export_package(project_path: Path, output_dir: Path) -> dict[str, Path]:
@@ -790,7 +884,11 @@ def export_package(project_path: Path, output_dir: Path) -> dict[str, Path]:
     try:
         stage_path = Path(tempfile.mkdtemp(prefix=prefix, dir=requested.parent))
         _write_all(data, stage_path)
-        published = _publish_atomically(stage_path, requested)
+        published = _publish_atomically(
+            stage_path,
+            requested,
+            data["project"]["project_id"],
+        )
         stage_path = None
     except ExportError:
         raise
