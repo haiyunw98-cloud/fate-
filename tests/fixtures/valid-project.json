@@ -1,0 +1,257 @@
+{
+  "schema_version": "1.0.0",
+  "project": {
+    "project_id": "PRJ001",
+    "title": "测试短剧",
+    "status": "completed",
+    "target_episode_count": 3
+  },
+  "source": {
+    "input_type": "pasted_text",
+    "file_name": null,
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "character_count": 1200,
+    "chapter_index": [],
+    "coverage": 1.0
+  },
+  "analysis": {
+    "world_bible": "架空古代江湖",
+    "timeline": [],
+    "story_arc": [],
+    "adaptation_decisions": []
+  },
+  "characters": [
+    {
+      "character_id": "C001",
+      "name": "林岚",
+      "importance": "lead",
+      "role": "protagonist",
+      "appearance": "青衣束发，目光坚毅",
+      "voice_profile": {
+        "voice": "清亮女声",
+        "tone": "沉稳",
+        "pace": "中速",
+        "sample_text": "这一次，我不会再退。"
+      }
+    }
+  ],
+  "scenes": [
+    {
+      "scene_id": "S001",
+      "name": "酒楼包厢",
+      "importance": "important"
+    }
+  ],
+  "props": [
+    {
+      "prop_id": "P001",
+      "name": "青铜长剑",
+      "importance": "important"
+    }
+  ],
+  "foods": [
+    {
+      "food_id": "F001",
+      "name": "莲花酥",
+      "importance": "important"
+    }
+  ],
+  "episodes": [
+    {
+      "episode_id": "E001",
+      "episode_number": 1,
+      "title": "剑鸣酒楼",
+      "script": "林岚在酒楼包厢发现青铜长剑。",
+      "shots": [
+        {
+          "shot_id": "E001_SH001",
+          "character_ids": ["C001"],
+          "scene_id": "S001",
+          "prop_ids": ["P001"],
+          "food_ids": ["F001"],
+          "prompt_zh": "林岚站在酒楼包厢内，桌上摆着莲花酥与青铜长剑",
+          "prompt_en": "Lin Lan stands in a tavern private room beside lotus pastries and a bronze sword",
+          "negative_prompt": "模糊，畸形手指，文字水印",
+          "expression_asset_id": null,
+          "action_asset_id": null
+        }
+      ]
+    },
+    {
+      "episode_id": "E002",
+      "episode_number": 2,
+      "title": "夜探旧巷",
+      "script": "林岚循着线索离开酒楼。",
+      "shots": [
+        {
+          "shot_id": "E002_SH001",
+          "character_ids": ["C001"],
+          "scene_id": "S001",
+          "prop_ids": [],
+          "food_ids": [],
+          "prompt_zh": "林岚回望昏暗的酒楼包厢",
+          "prompt_en": "Lin Lan looks back at the dim tavern private room",
+          "negative_prompt": "模糊，文字水印",
+          "expression_asset_id": null,
+          "action_asset_id": null
+        }
+      ]
+    },
+    {
+      "episode_id": "E003",
+      "episode_number": 3,
+      "title": "真相将明",
+      "script": "林岚重返酒楼，准备揭开真相。",
+      "shots": [
+        {
+          "shot_id": "E003_SH001",
+          "character_ids": ["C001"],
+          "scene_id": "S001",
+          "prop_ids": [],
+          "food_ids": [],
+          "prompt_zh": "晨光照进酒楼包厢，林岚神情坚定",
+          "prompt_en": "Morning light enters the tavern room as Lin Lan looks determined",
+          "negative_prompt": "模糊，文字水印",
+          "expression_asset_id": null,
+          "action_asset_id": null
+        }
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "asset_id": "STYLE_PRJ001",
+      "version": 1,
+      "asset_type": "style_reference",
+      "owner_type": "project",
+      "owner_id": "PRJ001",
+      "reference_token": "@项目_PRJ001_测试短剧_风格参考图_V001",
+      "file_name": "STYLE_PRJ001_V001.png",
+      "relative_path": "assets/style/STYLE_PRJ001_V001.png",
+      "checksum": "1111111111111111111111111111111111111111111111111111111111111111",
+      "prompt": "国风写实动画，统一光影和色彩",
+      "parent_asset_ids": [],
+      "status": "completed"
+    },
+    {
+      "asset_id": "CHAR_C001",
+      "version": 1,
+      "asset_type": "character_sheet",
+      "owner_type": "character",
+      "owner_id": "C001",
+      "reference_token": "@角色_C001_林岚_综合设定图_V001",
+      "file_name": "CHAR_C001_V001.png",
+      "relative_path": "assets/characters/CHAR_C001_V001.png",
+      "checksum": "2222222222222222222222222222222222222222222222222222222222222222",
+      "prompt": "林岚角色综合设定图，正侧背三视图",
+      "parent_asset_ids": [],
+      "status": "completed"
+    },
+    {
+      "asset_id": "EXPR_C001",
+      "version": 1,
+      "asset_type": "expression_sheet",
+      "owner_type": "character",
+      "owner_id": "C001",
+      "reference_token": "@角色_C001_林岚_表情设定图_V001",
+      "file_name": "EXPR_C001_V001.png",
+      "relative_path": "assets/characters/EXPR_C001_V001.png",
+      "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+      "prompt": "林岚喜怒哀惊表情设定图",
+      "parent_asset_ids": ["CHAR_C001"],
+      "status": "completed"
+    },
+    {
+      "asset_id": "ACTION_C001",
+      "version": 1,
+      "asset_type": "action_sheet",
+      "owner_type": "character",
+      "owner_id": "C001",
+      "reference_token": "@角色_C001_林岚_动作设定图_V001",
+      "file_name": "ACTION_C001_V001.png",
+      "relative_path": "assets/characters/ACTION_C001_V001.png",
+      "checksum": "4444444444444444444444444444444444444444444444444444444444444444",
+      "prompt": "林岚站立、行走和拔剑动作设定图",
+      "parent_asset_ids": ["CHAR_C001"],
+      "status": "completed"
+    },
+    {
+      "asset_id": "AUD_C001",
+      "version": 1,
+      "asset_type": "voice_sample",
+      "owner_type": "character",
+      "owner_id": "C001",
+      "reference_token": "@声音_AUD_C001_林岚_标准声音_V001",
+      "file_name": "AUD_C001_V001.wav",
+      "relative_path": "assets/audio/AUD_C001_V001.wav",
+      "checksum": "5555555555555555555555555555555555555555555555555555555555555555",
+      "prompt": "清亮沉稳的青年女声，中速朗读",
+      "parent_asset_ids": [],
+      "status": "completed"
+    },
+    {
+      "asset_id": "SCENE_S001",
+      "version": 1,
+      "asset_type": "scene_sheet",
+      "owner_type": "scene",
+      "owner_id": "S001",
+      "reference_token": "@场景_S001_酒楼包厢_场景设定图_V001",
+      "file_name": "SCENE_S001_V001.png",
+      "relative_path": "assets/scenes/SCENE_S001_V001.png",
+      "checksum": "6666666666666666666666666666666666666666666666666666666666666666",
+      "prompt": "古代酒楼包厢全景和机位参考",
+      "parent_asset_ids": ["STYLE_PRJ001"],
+      "status": "completed"
+    },
+    {
+      "asset_id": "PROP_P001",
+      "version": 1,
+      "asset_type": "prop_sheet",
+      "owner_type": "prop",
+      "owner_id": "P001",
+      "reference_token": "@道具_P001_青铜长剑_道具设定图_V001",
+      "file_name": "PROP_P001_V001.png",
+      "relative_path": "assets/props/PROP_P001_V001.png",
+      "checksum": "7777777777777777777777777777777777777777777777777777777777777777",
+      "prompt": "青铜长剑多角度道具设定图",
+      "parent_asset_ids": ["STYLE_PRJ001"],
+      "status": "completed"
+    },
+    {
+      "asset_id": "FOOD_F001",
+      "version": 1,
+      "asset_type": "food_image",
+      "owner_type": "food",
+      "owner_id": "F001",
+      "reference_token": "@食物_F001_莲花酥_食物设定图_V001",
+      "file_name": "FOOD_F001_V001.png",
+      "relative_path": "assets/foods/FOOD_F001_V001.png",
+      "checksum": "8888888888888888888888888888888888888888888888888888888888888888",
+      "prompt": "白瓷盘中的精致莲花酥特写",
+      "parent_asset_ids": ["STYLE_PRJ001"],
+      "status": "completed"
+    },
+    {
+      "asset_id": "SHOT_E001_SH001",
+      "version": 1,
+      "asset_type": "shot_sample",
+      "owner_type": "shot",
+      "owner_id": "E001_SH001",
+      "reference_token": "@镜头_E001_SH001_样片图_V001",
+      "file_name": "SHOT_E001_SH001_V001.png",
+      "relative_path": "assets/shots/SHOT_E001_SH001_V001.png",
+      "checksum": "9999999999999999999999999999999999999999999999999999999999999999",
+      "prompt": "首集首镜样片，角色与场景风格一致",
+      "parent_asset_ids": ["CHAR_C001", "SCENE_S001", "PROP_P001", "FOOD_F001"],
+      "status": "completed"
+    }
+  ],
+  "generation_settings": {
+    "aspect_ratio": "9:16",
+    "image_provider": "built_in_image_gen",
+    "voice_provider": "openai_speech",
+    "sample_episode_count": 1,
+    "script_episode_count": 3
+  },
+  "generation_runs": []
+}
