@@ -83,6 +83,11 @@ def _is_nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _contains_delimited_id(value: str, owner_id: str) -> bool:
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(owner_id)}(?![A-Za-z0-9])"
+    return re.search(pattern, value) is not None
+
+
 def _require_object(
     value: object, path: str, errors: list[str]
 ) -> dict[str, Any] | None:
@@ -421,9 +426,13 @@ def _validate_assets(
                 errors.append(f"{path} asset version does not match reference_token")
 
         if owner_id is not None:
-            if file_name is not None and owner_id not in file_name:
+            if file_name is not None and not _contains_delimited_id(
+                file_name, owner_id
+            ):
                 errors.append(f"{path}.file_name must include owner_id {owner_id}")
-            if reference_token is not None and owner_id not in reference_token:
+            if reference_token is not None and not _contains_delimited_id(
+                reference_token, owner_id
+            ):
                 errors.append(f"{path}.reference_token must include owner_id {owner_id}")
 
         _validate_string_list(
@@ -469,6 +478,7 @@ def _validate_assets(
 
 def _validate_media_gate(
     project_status: object,
+    project_id: str | None,
     characters: list[dict[str, Any]],
     scenes: list[dict[str, Any]],
     props: list[dict[str, Any]],
@@ -492,6 +502,13 @@ def _validate_media_gate(
             isinstance(value, str) for value in media_key
         ):
             completed.add(media_key)
+
+    if project_id is not None and (
+        "style_reference",
+        "project",
+        project_id,
+    ) not in completed:
+        errors.append(f"missing completed style_reference for {project_id}")
 
     for character in characters:
         importance = character.get("importance")
@@ -670,24 +687,13 @@ def validate_project(data: dict[str, Any]) -> list[str]:
     sample_count = settings.get("sample_episode_count") if settings else None
     script_count = settings.get("script_episode_count") if settings else None
     if (
-        project_status == "completed"
-        and _is_integer(script_count)
+        _is_integer(script_count)
         and script_count > 0
         and isinstance(data.get("episodes"), list)
-        and len(data["episodes"]) != script_count
+        and script_count > len(data["episodes"])
     ):
         errors.append(
-            f"completed project must contain exactly {script_count} scripted episodes"
-        )
-    if (
-        project_status == "production"
-        and _is_integer(script_count)
-        and script_count > 0
-        and isinstance(data.get("episodes"), list)
-        and len(data["episodes"]) < script_count
-    ):
-        errors.append(
-            f"production project must contain episodes 1 through {script_count}"
+            "generation_settings.script_episode_count cannot exceed episodes count"
         )
     if (
         _is_integer(sample_count)
@@ -727,6 +733,7 @@ def validate_project(data: dict[str, Any]) -> list[str]:
 
     _validate_media_gate(
         project_status,
+        project_id,
         characters,
         scenes,
         props,

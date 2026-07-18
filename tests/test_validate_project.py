@@ -162,6 +162,21 @@ def test_completed_project_requires_core_media(
     assert_has_error(validate_project(valid_project), expected)
 
 
+def test_completed_project_requires_project_style_reference(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["assets"] = [
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] != "style_reference"
+    ]
+
+    assert_has_error(
+        validate_project(valid_project),
+        "missing completed style_reference for PRJ001",
+    )
+
+
 def test_only_sample_episodes_require_shot_samples(valid_project: dict[str, Any]) -> None:
     assert not any(
         asset["asset_type"] == "shot_sample"
@@ -183,6 +198,35 @@ def test_target_episode_count_must_equal_episode_count(
     )
 
 
+def test_completed_project_may_have_episodes_beyond_script_scope(
+    valid_project: dict[str, Any],
+) -> None:
+    episode = copy.deepcopy(valid_project["episodes"][2])
+    episode["episode_id"] = "E004"
+    episode["episode_number"] = 4
+    episode["title"] = "后续待写"
+    episode["script"] = ""
+    episode["shots"][0]["shot_id"] = "E004_SH001"
+    episode["shots"][0]["prompt_zh"] = ""
+    episode["shots"][0]["prompt_en"] = ""
+    episode["shots"][0]["negative_prompt"] = ""
+    valid_project["episodes"].append(episode)
+    valid_project["project"]["target_episode_count"] = 4
+
+    assert validate_project(valid_project) == []
+
+
+def test_script_episode_count_cannot_exceed_total_episodes(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["generation_settings"]["script_episode_count"] = 4
+
+    assert_has_error(
+        validate_project(valid_project),
+        "generation_settings.script_episode_count cannot exceed episodes count",
+    )
+
+
 def test_production_requires_episodes_through_script_count(
     valid_project: dict[str, Any],
 ) -> None:
@@ -192,7 +236,7 @@ def test_production_requires_episodes_through_script_count(
 
     assert_has_error(
         validate_project(valid_project),
-        "production project must contain episodes 1 through 3",
+        "generation_settings.script_episode_count cannot exceed episodes count",
     )
 
 
@@ -265,6 +309,29 @@ def test_unhashable_nested_scalars_return_errors_without_raising(
     assert_has_error(errors, "characters[0].importance must be a nonempty string")
     assert_has_error(errors, "assets[0].asset_type must be a nonempty string")
     assert_has_error(errors, "assets[1].status is not allowed")
+
+
+def test_owner_id_must_be_exactly_delimited_in_file_name_and_token(
+    valid_project: dict[str, Any],
+) -> None:
+    asset = valid_project["assets"][1]
+    asset["file_name"] = "X_C0010_V001.png"
+    asset["reference_token"] = "@角色_C0010_林岚_综合设定图_V001"
+
+    errors = validate_project(valid_project)
+
+    assert_has_error(errors, "assets[1].file_name must include owner_id C001")
+    assert_has_error(errors, "assets[1].reference_token must include owner_id C001")
+
+
+def test_existing_delimited_owner_id_patterns_remain_valid(
+    valid_project: dict[str, Any],
+) -> None:
+    character_asset = valid_project["assets"][1]
+
+    assert character_asset["file_name"] == "CHAR_C001_V001.png"
+    assert character_asset["reference_token"] == "@角色_C001_林岚_综合设定图_V001"
+    assert validate_project(valid_project) == []
 
 
 def test_cli_prints_valid_and_exits_zero() -> None:
