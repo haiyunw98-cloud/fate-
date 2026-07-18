@@ -55,7 +55,14 @@ def _extract_docx(path: Path) -> str:
                     content.append("\n")
             paragraphs.append("".join(content))
         return "\n".join(paragraphs)
-    except (OSError, zipfile.BadZipFile, KeyError, ElementTree.ParseError) as error:
+    except (
+        OSError,
+        zipfile.BadZipFile,
+        KeyError,
+        ElementTree.ParseError,
+        RuntimeError,
+        NotImplementedError,
+    ) as error:
         raise SourceExtractionError(
             f"DOCX extraction failed for {path}: {error}"
         ) from error
@@ -219,6 +226,8 @@ def _extract_epub(path: Path) -> str:
         ElementTree.ParseError,
         UnicodeError,
         ValueError,
+        RuntimeError,
+        NotImplementedError,
     ) as error:
         raise SourceExtractionError(
             f"EPUB extraction failed for {path}: {error}"
@@ -228,8 +237,12 @@ def _extract_epub(path: Path) -> str:
 def _extract_pdf(path: Path) -> str:
     try:
         from pypdf import PdfReader
+    except ModuleNotFoundError as error:
+        if error.name == "pypdf":
+            raise SourceExtractionError("PDF extraction requires pypdf") from error
+        raise SourceExtractionError(f"PDF import failed: {error}") from error
     except ImportError as error:
-        raise SourceExtractionError("PDF extraction requires pypdf") from error
+        raise SourceExtractionError(f"PDF import failed: {error}") from error
 
     try:
         reader = PdfReader(path)
@@ -275,6 +288,17 @@ def extract_text(path: Path) -> str:
     return text
 
 
+def _same_file(input_path: Path, output_path: Path) -> bool:
+    if input_path.resolve() == output_path.resolve():
+        return True
+    if not input_path.exists() or not output_path.exists():
+        return False
+    try:
+        return input_path.samefile(output_path)
+    except OSError:
+        return False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Extract normalized text from a novel")
     parser.add_argument("input", type=Path)
@@ -282,7 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     try:
-        if arguments.input.resolve() == arguments.output.resolve():
+        if _same_file(arguments.input, arguments.output):
             raise SourceExtractionError("input and output must not be the same path")
         text = extract_text(arguments.input)
         arguments.output.parent.mkdir(parents=True, exist_ok=True)

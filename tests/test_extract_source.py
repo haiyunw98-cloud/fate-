@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import os
 import subprocess
 import sys
 import types
@@ -192,6 +193,32 @@ def test_docx_errors_are_attributed_to_docx(
         extract_text(source)
 
 
+@pytest.mark.parametrize("error_type", [RuntimeError, NotImplementedError])
+def test_docx_archive_read_failures_are_attributed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    source = tmp_path / "unreadable-member.docx"
+    _write_docx(source, "<document />")
+    original_read = zipfile.ZipFile.read
+
+    def reject_document_xml(
+        archive: zipfile.ZipFile, name: str, pwd: bytes | None = None
+    ) -> bytes:
+        if name == "word/document.xml":
+            raise error_type("member cannot be read")
+        return original_read(archive, name, pwd)
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", reject_document_xml)
+
+    with pytest.raises(SourceExtractionError) as error:
+        extract_text(source)
+
+    assert "DOCX" in str(error.value)
+    assert "member cannot be read" in str(error.value)
+
+
 def test_extracts_epub_body_documents_in_spine_order(tmp_path: Path) -> None:
     source = tmp_path / "novel.epub"
     _write_epub(source)
@@ -222,6 +249,43 @@ def test_missing_epub_spine_document_is_attributed_to_epub(tmp_path: Path) -> No
         extract_text(source)
 
 
+@pytest.mark.parametrize(
+    ("member", "error_type"),
+    [
+        ("META-INF/container.xml", RuntimeError),
+        ("META-INF/container.xml", NotImplementedError),
+        ("OEBPS/content.opf", RuntimeError),
+        ("OEBPS/content.opf", NotImplementedError),
+        ("OEBPS/text/chapter1.xhtml", RuntimeError),
+        ("OEBPS/text/chapter1.xhtml", NotImplementedError),
+    ],
+)
+def test_epub_archive_read_failures_are_attributed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    member: str,
+    error_type: type[Exception],
+) -> None:
+    source = tmp_path / "unreadable-member.epub"
+    _write_epub(source)
+    original_read = zipfile.ZipFile.read
+
+    def reject_member(
+        archive: zipfile.ZipFile, name: str, pwd: bytes | None = None
+    ) -> bytes:
+        if name == member:
+            raise error_type("member cannot be read")
+        return original_read(archive, name, pwd)
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", reject_member)
+
+    with pytest.raises(SourceExtractionError) as error:
+        extract_text(source)
+
+    assert "EPUB" in str(error.value)
+    assert "member cannot be read" in str(error.value)
+
+
 def test_pdf_reports_exact_missing_dependency_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -238,6 +302,45 @@ def test_pdf_reports_exact_missing_dependency_error(
 
     with pytest.raises(SourceExtractionError, match="^PDF extraction requires pypdf$"):
         extract_text(source)
+
+
+@pytest.mark.parametrize(
+    ("import_error", "reason"),
+    [
+        (
+            ModuleNotFoundError(
+                "No module named 'pypdf_helper'", name="pypdf_helper"
+            ),
+            "pypdf_helper",
+        ),
+        (ImportError("installed pypdf is broken"), "installed pypdf is broken"),
+    ],
+)
+def test_pdf_nested_import_failures_are_attributed_not_reported_as_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    import_error: ImportError,
+    reason: str,
+) -> None:
+    source = tmp_path / "novel.pdf"
+    source.write_bytes(b"%PDF-placeholder")
+    real_import = builtins.__import__
+
+    def reject_pypdf(name: str, *args: object, **kwargs: object) -> object:
+        if name == "pypdf":
+            raise import_error
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_pypdf)
+
+    with pytest.raises(SourceExtractionError) as error:
+        extract_text(source)
+
+    message = str(error.value)
+    assert "PDF" in message
+    assert "import" in message.lower()
+    assert reason in message
+    assert message != "PDF extraction requires pypdf"
 
 
 def test_pdf_reports_blank_pages_need_ocr(
@@ -294,6 +397,51 @@ def test_cli_refuses_same_input_and_output_without_changing_source(tmp_path: Pat
     assert completed.returncode != 0
     assert "same" in completed.stderr.lower()
     assert source.read_text(encoding="utf-8") == original
+
+
+def test_cli_refuses_hard_link_output_without_changing_source(tmp_path: Path) -> None:
+    source = tmp_path / "novel.txt"
+    output = tmp_path / "hard-link.txt"
+    original = "第一章\n原始内容\n最终结局".encode("utf-8")
+    source.write_bytes(original)
+    os.link(source, output)
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), str(source), "--output", str(output)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "same" in completed.stderr.lower()
+    assert "traceback" not in completed.stderr.lower()
+    assert source.read_bytes() == original
+    assert output.read_bytes() == original
+
+
+def test_cli_ignores_samefile_oserror_for_distinct_existing_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "novel.txt"
+    output = tmp_path / "existing-output.txt"
+    source.write_text("第一章\n最终结局", encoding="utf-8")
+    output.write_text("旧输出", encoding="utf-8")
+    samefile_calls = 0
+
+    def unavailable_samefile(path: Path, other: Path) -> bool:
+        nonlocal samefile_calls
+        samefile_calls += 1
+        raise OSError("samefile unavailable")
+
+    monkeypatch.setattr(Path, "samefile", unavailable_samefile)
+
+    result = extract_source.main([str(source), "--output", str(output)])
+
+    assert result == 0
+    assert samefile_calls == 1
+    assert output.read_text(encoding="utf-8") == "第一章\n最终结局\n"
 
 
 def test_cli_reports_missing_plain_source_without_traceback(tmp_path: Path) -> None:
