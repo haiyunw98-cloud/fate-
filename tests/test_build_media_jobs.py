@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -211,6 +213,86 @@ def test_shot_job_uses_version_active_for_its_episode(
     assert "@角色_C001_林岚_综合设定图_V002" not in job["reference_tokens"]
 
 
+def test_first_episode_schedules_exact_pending_ranged_character_version(
+    valid_project: dict[str, Any],
+) -> None:
+    character_v1 = next(
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] == "character_sheet"
+    )
+    character_v1.update({"status": "confirmed", "episode_range": [1, 1]})
+    character_v2 = copy.deepcopy(character_v1)
+    character_v2.update(
+        {
+            "version": 2,
+            "reference_token": "@角色_C001_林岚_综合设定图_V002",
+            "file_name": "CHAR_C001_V002.png",
+            "relative_path": "assets/characters/CHAR_C001_V002.png",
+            "status": "completed",
+            "episode_range": [2, 3],
+        }
+    )
+    valid_project["assets"].append(character_v2)
+    valid_project["assets"] = [
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] != "shot_sample"
+    ]
+
+    jobs = build_media_jobs(valid_project)
+    character_job = next(
+        job
+        for job in jobs
+        if job["kind"] == "character_sheet" and job["version"] == 1
+    )
+    shot_job = _job(jobs, "shot_sample", "E001_SH001")
+
+    assert character_job["output"]["reference_token"].endswith("_V001")
+    assert character_job["job_id"] in shot_job["depends_on"]
+
+
+def test_all_incomplete_stage_versions_keep_distinct_jobs(
+    valid_project: dict[str, Any],
+) -> None:
+    character_v1 = next(
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] == "character_sheet"
+    )
+    character_v1["status"] = "confirmed"
+    character_v2 = copy.deepcopy(character_v1)
+    character_v2.update(
+        {
+            "version": 2,
+            "reference_token": "@角色_C001_林岚_综合设定图_V002",
+            "file_name": "CHAR_C001_V002.png",
+            "relative_path": "assets/characters/CHAR_C001_V002.png",
+            "status": "redo",
+        }
+    )
+    valid_project["assets"].append(character_v2)
+    for field in ("prompt_zh", "prompt_en"):
+        valid_project["episodes"][0]["shots"][0][field] = valid_project[
+            "episodes"
+        ][0]["shots"][0][field].replace(
+            "@角色_C001_林岚_综合设定图_V001",
+            "@角色_C001_林岚_综合设定图_V002",
+        )
+
+    character_jobs = [
+        job
+        for job in build_media_jobs(valid_project)
+        if job["kind"] == "character_sheet" and job["owner_id"] == "C001"
+    ]
+
+    assert [(job["asset_id"], job["version"]) for job in character_jobs] == [
+        ("CHAR_C001", 1),
+        ("CHAR_C001", 2),
+    ]
+    assert len({job["job_id"] for job in character_jobs}) == 2
+
+
 def test_secondary_props_foods_and_scenes_do_not_create_jobs(
     valid_project: dict[str, Any],
 ) -> None:
@@ -337,6 +419,7 @@ def test_completed_dialogue_audio_is_not_rebuilt(
             "relative_path": "assets/audio/dialogue/DIALOGUE_E001_SH001_L001_V001.wav",
             "checksum": "a" * 64,
             "prompt": "我不会再退。",
+            "speaker_id": "C001",
             "parent_asset_ids": ["AUD_C001"],
             "status": "completed",
         }
@@ -362,9 +445,20 @@ def _dialogue_asset(version: int, status: str) -> dict[str, Any]:
         ),
         "checksum": "a" * 64 if status == "completed" else "",
         "prompt": "我不会再退。",
+        "speaker_id": "C001",
         "parent_asset_ids": ["AUD_C001"],
         "status": status,
     }
+
+
+def _dialogue_fingerprint(speaker_id: str, text: str) -> str:
+    payload = json.dumps(
+        {"speaker_id": speaker_id, "text": text},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def test_discarded_dialogue_history_advances_to_next_unique_version(
@@ -414,6 +508,68 @@ def test_latest_completed_dialogue_version_skips_even_with_older_history(
     assert not any(
         job["kind"] == "dialogue_audio" for job in build_media_jobs(valid_project)
     )
+
+
+def test_dialogue_job_carries_stable_content_fingerprint_in_input_and_output(
+    valid_project: dict[str, Any],
+) -> None:
+    text = "这一次，我不会再退。"
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C001", "text": text}
+    ]
+
+    dialogue = _job(build_media_jobs(valid_project), "dialogue_audio", "E001_SH001")
+    expected = _dialogue_fingerprint("C001", text)
+
+    assert dialogue["input"]["content_fingerprint"] == expected
+    assert dialogue["output"]["content_fingerprint"] == expected
+
+
+def test_changed_dialogue_text_advances_past_completed_asset(
+    valid_project: dict[str, Any],
+) -> None:
+    old = _dialogue_asset(1, "completed")
+    old["content_fingerprint"] = _dialogue_fingerprint("C001", old["prompt"])
+    valid_project["assets"].append(old)
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C001", "text": "这一次，我绝不后退。"}
+    ]
+
+    dialogue = _job(build_media_jobs(valid_project), "dialogue_audio", "E001_SH001")
+
+    assert dialogue["version"] == 2
+    assert dialogue["input"]["content_fingerprint"] != old["content_fingerprint"]
+
+
+def test_changed_dialogue_speaker_does_not_resume_incomplete_old_audio(
+    valid_project: dict[str, Any],
+) -> None:
+    old = _dialogue_asset(1, "confirmed")
+    old["content_fingerprint"] = _dialogue_fingerprint("C001", old["prompt"])
+    valid_project["assets"].append(old)
+    valid_project["characters"].append(
+        {
+            "character_id": "C002",
+            "name": "小二",
+            "importance": "cameo",
+            "role": "waiter",
+            "appearance": "灰色短打",
+            "voice_profile": {
+                "voice": "年轻男声",
+                "tone": "热情",
+                "pace": "稍快",
+                "sample_text": "客官请慢用。",
+            },
+        }
+    )
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C002", "text": old["prompt"]}
+    ]
+
+    dialogue = _job(build_media_jobs(valid_project), "dialogue_audio", "E001_SH001")
+
+    assert dialogue["version"] == 2
+    assert dialogue["input"]["speaker_id"] == "C002"
 
 
 def test_sort_media_jobs_rejects_dependency_cycles() -> None:
@@ -503,6 +659,184 @@ def test_write_jobs_propagates_atomic_write_errors(
     with pytest.raises(OSError, match="disk full"):
         write_jobs(project_path)
     assert not (tmp_path / "media-jobs.json").exists()
+
+
+def test_write_jobs_rejects_same_input_and_output_before_reading(tmp_path: Path) -> None:
+    project_path = tmp_path / "project.json"
+    original = b"{not-json-but-must-not-be-read"
+    project_path.write_bytes(original)
+
+    with pytest.raises(MediaJobError, match="same file"):
+        write_jobs(project_path, project_path)
+
+    assert project_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_write_jobs_rejects_alias_of_project_file(
+    tmp_path: Path,
+    valid_project: dict[str, Any],
+    link_kind: str,
+) -> None:
+    project_path = tmp_path / "project.json"
+    project_path.write_text(json.dumps(valid_project), encoding="utf-8")
+    original = project_path.read_bytes()
+    alias = tmp_path / "media-jobs.json"
+    if link_kind == "symlink":
+        alias.symlink_to(project_path)
+    else:
+        os.link(project_path, alias)
+
+    with pytest.raises(MediaJobError, match="same file"):
+        write_jobs(project_path, alias)
+
+    assert project_path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "/tmp/CHAR_C001_V001.png",
+        "../../CHAR_C001_V001.png",
+        r"C:\\assets\\CHAR_C001_V001.png",
+        r"\\\\server\\share\\CHAR_C001_V001.png",
+        "assets/scenes/CHAR_C001_V001.png",
+    ],
+)
+def test_scheduled_output_path_must_be_confined_to_kind_folder(
+    valid_project: dict[str, Any], relative_path: str
+) -> None:
+    character = next(
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] == "character_sheet"
+    )
+    character.update({"status": "confirmed", "relative_path": relative_path})
+
+    with pytest.raises(MediaJobError, match="output"):
+        build_media_jobs(valid_project)
+
+
+@pytest.mark.parametrize(
+    ("file_name", "relative_path"),
+    [
+        ("nested/CHAR_C001_V001.png", "assets/characters/nested/CHAR_C001_V001.png"),
+        ("CHAR_C001_V001.png", "assets/characters/OTHER_V001.png"),
+        ("CHAR_C001_V001.wav", "assets/characters/CHAR_C001_V001.wav"),
+    ],
+)
+def test_scheduled_output_filename_and_extension_are_validated(
+    valid_project: dict[str, Any], file_name: str, relative_path: str
+) -> None:
+    character = next(
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] == "character_sheet"
+    )
+    character.update(
+        {
+            "status": "confirmed",
+            "file_name": file_name,
+            "relative_path": relative_path,
+        }
+    )
+
+    with pytest.raises(MediaJobError, match="output"):
+        build_media_jobs(valid_project)
+
+
+@pytest.mark.parametrize(
+    ("collection", "bad_value"),
+    [
+        ("characters", "bad character"),
+        ("scenes", "bad scene"),
+        ("props", "bad prop"),
+        ("foods", "bad food"),
+        ("assets", "bad asset"),
+    ],
+)
+def test_malformed_collection_member_is_rejected_with_json_path(
+    valid_project: dict[str, Any], collection: str, bad_value: str
+) -> None:
+    valid_project[collection].append(bad_value)
+    index = len(valid_project[collection]) - 1
+
+    with pytest.raises(MediaJobError, match=rf"{collection}\[{index}\].*object"):
+        build_media_jobs(valid_project)
+
+
+def test_non_object_episode_and_shot_are_rejected_with_json_path(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["episodes"].append("bad episode")
+    with pytest.raises(MediaJobError, match=r"episodes\[3\].*object"):
+        build_media_jobs(valid_project)
+
+    valid_project["episodes"].pop()
+    valid_project["episodes"][0]["shots"].append("bad shot")
+    with pytest.raises(MediaJobError, match=r"episodes\[0\]\.shots\[1\].*object"):
+        build_media_jobs(valid_project)
+
+
+def test_noncanonical_episode_order_is_rejected_without_sampling_e002(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["episodes"][0], valid_project["episodes"][1] = (
+        valid_project["episodes"][1],
+        valid_project["episodes"][0],
+    )
+    valid_project["assets"] = [
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] != "shot_sample"
+    ]
+
+    with pytest.raises(MediaJobError, match="E001"):
+        build_media_jobs(valid_project)
+
+
+def test_duplicate_e001_is_rejected(valid_project: dict[str, Any]) -> None:
+    duplicate = copy.deepcopy(valid_project["episodes"][0])
+    valid_project["episodes"].append(duplicate)
+
+    with pytest.raises(MediaJobError, match="E001"):
+        build_media_jobs(valid_project)
+
+
+@pytest.mark.parametrize("prompt_field", ["prompt_zh", "prompt_en"])
+def test_shot_missing_required_active_token_is_rejected(
+    valid_project: dict[str, Any], prompt_field: str
+) -> None:
+    shot = valid_project["episodes"][0]["shots"][0]
+    shot[prompt_field] = shot[prompt_field].replace(
+        "@角色_C001_林岚_综合设定图_V001", ""
+    )
+    valid_project["assets"] = [
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] != "shot_sample"
+    ]
+
+    with pytest.raises(MediaJobError, match=prompt_field):
+        build_media_jobs(valid_project)
+
+
+def test_shot_unknown_or_wrong_version_token_is_rejected(
+    valid_project: dict[str, Any],
+) -> None:
+    shot = valid_project["episodes"][0]["shots"][0]
+    shot["prompt_en"] = shot["prompt_en"].replace(
+        "@角色_C001_林岚_综合设定图_V001",
+        "@角色_C001_林岚_综合设定图_V999",
+    )
+    valid_project["assets"] = [
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] != "shot_sample"
+    ]
+
+    with pytest.raises(MediaJobError, match="unknown reference token|token set"):
+        build_media_jobs(valid_project)
 
 
 def test_cli_reports_load_error_without_creating_manifest(tmp_path: Path) -> None:
