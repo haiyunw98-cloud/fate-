@@ -195,7 +195,31 @@ def test_registered_reference_tokens_may_contain_hyphens(
     assert validate_references(valid_project) == []
 
 
-@pytest.mark.parametrize("suffix", ["FORGED", "_FORGED"])
+def test_registered_token_may_be_immediately_followed_by_cjk_narrative(
+    valid_project: dict[str, Any],
+) -> None:
+    replace_in_both(
+        shot(valid_project),
+        f"林岚{CHAR_V1}",
+        f"林岚{CHAR_V1}推门进入",
+    )
+
+    assert validate_references(valid_project) == []
+
+
+def test_cjk_word_after_registered_token_is_narrative_not_forgery(
+    valid_project: dict[str, Any],
+) -> None:
+    replace_in_both(
+        shot(valid_project),
+        f"林岚{CHAR_V1}",
+        f"林岚{CHAR_V1}伪造",
+    )
+
+    assert validate_references(valid_project) == []
+
+
+@pytest.mark.parametrize("suffix", ["FORGED", "123", "_FORGED", "-FORGED"])
 def test_registered_token_prefix_with_allowed_suffix_is_unknown(
     valid_project: dict[str, Any], suffix: str
 ) -> None:

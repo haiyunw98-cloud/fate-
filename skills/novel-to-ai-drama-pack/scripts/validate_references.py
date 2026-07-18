@@ -151,6 +151,12 @@ def _active_asset(
 
 
 def _scan_tokens(prompt: str, known_tokens: set[str]) -> list[_TokenOccurrence]:
+    """Scan delimiter-free tokens while preserving adjacent Chinese prose.
+
+    An exact registered ``_VNNN`` token ends before following CJK narrative;
+    ASCII letters, digits, underscores, or hyphens continue the candidate and
+    therefore make it unknown. Other unregistered ``@`` runs stay unknown.
+    """
     occurrences: list[_TokenOccurrence] = []
     known_longest_first = sorted(known_tokens, key=lambda token: (-len(token), token))
     position = 0
