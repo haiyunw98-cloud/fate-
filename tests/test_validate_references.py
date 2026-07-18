@@ -195,6 +195,88 @@ def test_registered_reference_tokens_may_contain_hyphens(
     assert validate_references(valid_project) == []
 
 
+@pytest.mark.parametrize("suffix", ["FORGED", "_FORGED"])
+def test_registered_token_prefix_with_allowed_suffix_is_unknown(
+    valid_project: dict[str, Any], suffix: str
+) -> None:
+    forged = f"{CHAR_V1}{suffix}"
+    replace_in_both(shot(valid_project), CHAR_V1, forged)
+
+    errors = validate_references(valid_project)
+
+    assert_has_error(errors, f"unknown reference token: {forged}")
+
+
+def test_valid_inline_reference_plus_detached_duplicate_is_rejected(
+    valid_project: dict[str, Any],
+) -> None:
+    for field in ("prompt_zh", "prompt_en"):
+        shot(valid_project)[field] += f" 游离引用 {CHAR_V1}"
+
+    assert_has_error(
+        validate_references(valid_project),
+        f"detached or duplicate reference token: {CHAR_V1}",
+    )
+
+
+@pytest.mark.parametrize("duplicate_token", [EXPR_V1, ACTION_V1])
+def test_duplicate_expression_or_action_occurrence_is_rejected(
+    valid_project: dict[str, Any], duplicate_token: str
+) -> None:
+    current = shot(valid_project)
+    current["expression_asset_id"] = "EXPR_C001"
+    current["action_asset_id"] = "ACTION_C001"
+    replace_in_both(
+        current,
+        f"林岚{CHAR_V1}",
+        f"林岚{CHAR_V1}{EXPR_V1}{ACTION_V1}",
+    )
+    for field in ("prompt_zh", "prompt_en"):
+        current[field] += f" 重复 {duplicate_token}"
+
+    assert_has_error(
+        validate_references(valid_project),
+        f"detached or duplicate reference token: {duplicate_token}",
+    )
+
+
+def test_two_distinct_character_chains_are_both_valid(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["characters"].append(
+        {
+            "character_id": "C002",
+            "name": "沈砺",
+            "importance": "major",
+            "role": "ally",
+            "appearance": "黑衣持刀",
+            "voice_profile": {
+                "voice": "低沉男声",
+                "tone": "冷静",
+                "pace": "中速",
+                "sample_text": "跟我走。",
+            },
+        }
+    )
+    char_c002 = "@角色_C002_沈砺_综合设定图_V001"
+    valid_project["assets"].append(
+        completed_asset(
+            asset_id="CHAR_C002",
+            version=1,
+            asset_type="character_sheet",
+            owner_type="character",
+            owner_id="C002",
+            token=char_c002,
+        )
+    )
+    current = shot(valid_project)
+    current["character_ids"].append("C002")
+    for field in ("prompt_zh", "prompt_en"):
+        current[field] += f" 沈砺{char_c002}走进包厢"
+
+    assert validate_references(valid_project) == []
+
+
 def test_chinese_and_english_token_sets_must_match(
     valid_project: dict[str, Any],
 ) -> None:

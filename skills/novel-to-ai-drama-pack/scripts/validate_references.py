@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,10 +15,21 @@ _UNKNOWN_TOKEN = re.compile(
     r"@[A-Za-z0-9_\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
     r"\U00020000-\U0002fa1f-]+"
 )
+_CJK_IDEOGRAPH = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f]"
+)
 _REFERENCE_SPECS = (
     ("prop_ids", "props", "prop_id", "prop_sheet"),
     ("food_ids", "foods", "food_id", "food_image"),
 )
+
+
+@dataclass(frozen=True)
+class _TokenOccurrence:
+    token: str
+    start: int
+    end: int
+    known: bool
 
 
 def _single_line(value: object) -> str:
@@ -138,33 +150,43 @@ def _active_asset(
     return max(candidates, key=lambda asset: asset["version"])
 
 
-def _scan_tokens(prompt: str, known_tokens: set[str]) -> tuple[set[str], set[str]]:
-    found: set[str] = set()
-    unknown: set[str] = set()
+def _scan_tokens(prompt: str, known_tokens: set[str]) -> list[_TokenOccurrence]:
+    occurrences: list[_TokenOccurrence] = []
     known_longest_first = sorted(known_tokens, key=lambda token: (-len(token), token))
     position = 0
     while True:
         start = prompt.find("@", position)
         if start < 0:
             break
-        matched = next(
+        unknown_match = _UNKNOWN_TOKEN.match(prompt, start)
+        candidate = unknown_match.group() if unknown_match is not None else "@"
+        candidate_end = unknown_match.end() if unknown_match is not None else start + 1
+        if candidate in known_tokens:
+            occurrences.append(_TokenOccurrence(candidate, start, candidate_end, True))
+            position = candidate_end
+            continue
+
+        narrative_prefix = next(
             (
                 token
                 for token in known_longest_first
-                if prompt.startswith(token, start)
+                if candidate.startswith(token)
+                and len(candidate) > len(token)
+                and _CJK_IDEOGRAPH.fullmatch(candidate[len(token)])
             ),
             None,
         )
-        if matched is not None:
-            found.add(matched)
-            position = start + len(matched)
+        if narrative_prefix is not None:
+            token_end = start + len(narrative_prefix)
+            occurrences.append(
+                _TokenOccurrence(narrative_prefix, start, token_end, True)
+            )
+            position = token_end
             continue
 
-        unknown_match = _UNKNOWN_TOKEN.match(prompt, start)
-        candidate = unknown_match.group() if unknown_match is not None else "@"
-        unknown.add(candidate)
-        position = unknown_match.end() if unknown_match is not None else start + 1
-    return found, unknown
+        occurrences.append(_TokenOccurrence(candidate, start, candidate_end, False))
+        position = candidate_end
+    return occurrences
 
 
 def _resolve_required_asset(
@@ -246,8 +268,8 @@ def _required_references(
     episode_number: int,
     shot_path: str,
     errors: list[str],
-) -> tuple[list[tuple[str, str, str, str]], set[str]]:
-    required: list[tuple[str, str, str, str]] = []
+) -> tuple[list[tuple[str, str, tuple[str, ...]]], set[str]]:
+    required: list[tuple[str, str, tuple[str, ...]]] = []
     allowed_tokens: set[str] = set()
     character_ids = _listed_ids(shot, "character_ids", shot_path, errors)
     extras = _selected_character_extras(
@@ -275,8 +297,7 @@ def _required_references(
             continue
         base_token = asset["reference_token"]
         chain_tokens = [base_token, *extras.get(character_id, [])]
-        chain = "".join(chain_tokens)
-        required.append((character_id, name, base_token, chain))
+        required.append((character_id, name, tuple(chain_tokens)))
         allowed_tokens.update(chain_tokens)
 
     extra_owners = sorted(set(extras) - set(character_ids))
@@ -306,7 +327,7 @@ def _required_references(
             )
             if isinstance(name, str) and name and asset is not None:
                 token = asset["reference_token"]
-                required.append((scene_id, name, token, token))
+                required.append((scene_id, name, (token,)))
                 allowed_tokens.add(token)
 
     for field, collection, id_field, asset_type in _REFERENCE_SPECS:
@@ -328,7 +349,7 @@ def _required_references(
             )
             if isinstance(name, str) and name and asset is not None:
                 token = asset["reference_token"]
-                required.append((object_id, name, token, token))
+                required.append((object_id, name, (token,)))
                 allowed_tokens.add(token)
     return required, allowed_tokens
 
@@ -336,7 +357,7 @@ def _required_references(
 def _check_prompt(
     prompt: object,
     prompt_path: str,
-    required: list[tuple[str, str, str, str]],
+    required: list[tuple[str, str, tuple[str, ...]]],
     allowed_tokens: set[str],
     known_tokens: set[str],
     errors: list[str],
@@ -345,18 +366,59 @@ def _check_prompt(
         errors.append(f"{prompt_path} must be a string")
         return set()
 
-    found, unknown = _scan_tokens(prompt, known_tokens)
-    for token in sorted(unknown):
-        errors.append(f"{prompt_path}: unknown reference token: {_single_line(token)}")
+    occurrences = _scan_tokens(prompt, known_tokens)
+    for occurrence in occurrences:
+        if not occurrence.known:
+            errors.append(
+                f"{prompt_path}: unknown reference token: "
+                f"{_single_line(occurrence.token)}"
+            )
 
-    for object_id, name, base_token, chain in required:
+    known_values = {
+        occurrence.token for occurrence in occurrences if occurrence.known
+    }
+    consumed: set[int] = set()
+    for object_id, name, chain_tokens in required:
+        base_token = chain_tokens[0]
+        chain = "".join(chain_tokens)
         exact = f"{name}{chain}"
-        if exact in prompt:
+        match_start = 0
+        matching_indices: list[int] | None = None
+        while True:
+            exact_start = prompt.find(exact, match_start)
+            if exact_start < 0:
+                break
+            token_start = exact_start + len(name)
+            candidate_indices: list[int] = []
+            for token in chain_tokens:
+                occurrence_index = next(
+                    (
+                        index
+                        for index, occurrence in enumerate(occurrences)
+                        if index not in consumed
+                        and occurrence.known
+                        and occurrence.token == token
+                        and occurrence.start == token_start
+                        and occurrence.end == token_start + len(token)
+                    ),
+                    None,
+                )
+                if occurrence_index is None:
+                    break
+                candidate_indices.append(occurrence_index)
+                token_start += len(token)
+            if len(candidate_indices) == len(chain_tokens):
+                matching_indices = candidate_indices
+                break
+            match_start = exact_start + 1
+
+        if matching_indices is not None:
+            consumed.update(matching_indices)
             continue
-        if base_token not in found:
+        if base_token not in known_values:
             same_owner_tokens = [
                 token
-                for token in found
+                for token in known_values
                 if f"_{object_id}_" in token and token != base_token
             ]
             if same_owner_tokens:
@@ -366,7 +428,7 @@ def _check_prompt(
                 )
             else:
                 errors.append(f"{prompt_path}: {object_id} missing inline reference")
-        elif chain != base_token:
+        elif len(chain_tokens) > 1:
             errors.append(
                 f"{prompt_path}: {object_id} reference chain must be exactly "
                 f"{_single_line(exact)}"
@@ -377,11 +439,20 @@ def _check_prompt(
                 f"{_single_line(name)}"
             )
 
-    for token in sorted(found - allowed_tokens):
-        errors.append(
-            f"{prompt_path}: unrelated reference token: {_single_line(token)}"
-        )
-    return found
+    for index, occurrence in enumerate(occurrences):
+        if not occurrence.known or index in consumed:
+            continue
+        if occurrence.token in allowed_tokens:
+            errors.append(
+                f"{prompt_path}: detached or duplicate reference token: "
+                f"{_single_line(occurrence.token)}"
+            )
+        else:
+            errors.append(
+                f"{prompt_path}: unrelated reference token: "
+                f"{_single_line(occurrence.token)}"
+            )
+    return {occurrence.token for occurrence in occurrences}
 
 
 def validate_references(data: dict[str, Any]) -> list[str]:
