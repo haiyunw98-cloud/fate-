@@ -281,6 +281,44 @@ def test_first_episode_dialogue_is_one_audio_job_per_line_and_depends_on_voice(
     ]
 
 
+def test_minor_speaker_gets_dialogue_audio_without_voice_sample_job(
+    valid_project: dict[str, Any],
+) -> None:
+    minor_profile = {
+        "voice": "年轻小二声",
+        "tone": "热情",
+        "pace": "稍快",
+        "sample_text": "客官，您的菜齐了。",
+    }
+    valid_project["characters"].append(
+        {
+            "character_id": "C002",
+            "name": "小二",
+            "importance": "minor",
+            "role": "waiter",
+            "appearance": "灰色短打",
+            "voice_profile": minor_profile,
+        }
+    )
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C002", "text": "客官，莲花酥来了。"}
+    ]
+
+    jobs = build_media_jobs(valid_project)
+    dialogue = _job(jobs, "dialogue_audio", "E001_SH001")
+
+    assert not any(
+        job["kind"] == "voice_sample" and job["owner_id"] == "C002"
+        for job in jobs
+    )
+    assert dialogue["depends_on"] == []
+    assert dialogue["input"]["voice_profile"] == minor_profile
+    assert dialogue["input"]["text"] == "客官，莲花酥来了。"
+    assert dialogue["input"]["built_in_voice"] == "coral"
+    assert 4 <= len(dialogue["input"]["delivery_instructions"]) <= 8
+    assert dialogue["input"]["ai_generated"] is True
+
+
 def test_completed_dialogue_audio_is_not_rebuilt(
     valid_project: dict[str, Any],
 ) -> None:
@@ -302,6 +340,75 @@ def test_completed_dialogue_audio_is_not_rebuilt(
             "parent_asset_ids": ["AUD_C001"],
             "status": "completed",
         }
+    )
+
+    assert not any(
+        job["kind"] == "dialogue_audio" for job in build_media_jobs(valid_project)
+    )
+
+
+def _dialogue_asset(version: int, status: str) -> dict[str, Any]:
+    return {
+        "asset_id": "DIALOGUE_E001_SH001_L001",
+        "version": version,
+        "asset_type": "dialogue_audio",
+        "owner_type": "shot",
+        "owner_id": "E001_SH001",
+        "reference_token": f"@声音_DIALOGUE_E001_SH001_L001_对白_V{version:03d}",
+        "file_name": f"DIALOGUE_E001_SH001_L001_V{version:03d}.wav",
+        "relative_path": (
+            "assets/audio/dialogue/"
+            f"DIALOGUE_E001_SH001_L001_V{version:03d}.wav"
+        ),
+        "checksum": "a" * 64 if status == "completed" else "",
+        "prompt": "我不会再退。",
+        "parent_asset_ids": ["AUD_C001"],
+        "status": status,
+    }
+
+
+def test_discarded_dialogue_history_advances_to_next_unique_version(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C001", "text": "我不会再退。"}
+    ]
+    valid_project["assets"].append(_dialogue_asset(1, "discarded"))
+
+    dialogue = _job(build_media_jobs(valid_project), "dialogue_audio", "E001_SH001")
+
+    assert dialogue["version"] == 2
+    assert dialogue["job_id"] == "JOB_DIALOGUE_E001_SH001_L001_V002"
+    assert dialogue["output"]["file_name"] == (
+        "DIALOGUE_E001_SH001_L001_V002.wav"
+    )
+    assert dialogue["output"]["reference_token"].endswith("_V002")
+
+
+def test_latest_incomplete_dialogue_version_is_resumed_not_incremented(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C001", "text": "我不会再退。"}
+    ]
+    valid_project["assets"].extend(
+        [_dialogue_asset(1, "discarded"), _dialogue_asset(2, "confirmed")]
+    )
+
+    dialogue = _job(build_media_jobs(valid_project), "dialogue_audio", "E001_SH001")
+
+    assert dialogue["version"] == 2
+    assert dialogue["output"]["file_name"].endswith("_V002.wav")
+
+
+def test_latest_completed_dialogue_version_skips_even_with_older_history(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C001", "text": "我不会再退。"}
+    ]
+    valid_project["assets"].extend(
+        [_dialogue_asset(1, "discarded"), _dialogue_asset(2, "completed")]
     )
 
     assert not any(

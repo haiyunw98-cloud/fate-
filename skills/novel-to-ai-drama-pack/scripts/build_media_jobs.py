@@ -315,6 +315,46 @@ def _dialogue_lines(shot: dict[str, Any]) -> list[dict[str, str]]:
     return lines
 
 
+def _resolve_dialogue_asset(
+    assets: list[dict[str, Any]],
+    *,
+    asset_id: str,
+    shot_id: str,
+    text: str,
+) -> tuple[dict[str, Any], bool]:
+    history = [
+        asset
+        for asset in assets
+        if asset.get("asset_id") == asset_id
+        and asset.get("asset_type") == "dialogue_audio"
+        and _positive_version(asset.get("version")) is not None
+    ]
+    if history:
+        latest = max(history, key=lambda asset: int(asset["version"]))
+        if latest.get("status") == "completed":
+            return latest, True
+        if latest.get("status") != "discarded":
+            return latest, False
+        version = max(int(asset["version"]) for asset in history) + 1
+    else:
+        version = 1
+
+    file_name = f"{asset_id}_V{version:03d}.wav"
+    return (
+        {
+            "asset_id": asset_id,
+            "version": version,
+            "asset_type": "dialogue_audio",
+            "owner_id": shot_id,
+            "reference_token": f"@声音_{asset_id}_对白_V{version:03d}",
+            "file_name": file_name,
+            "relative_path": f"assets/audio/dialogue/{file_name}",
+            "prompt": text,
+        },
+        False,
+    )
+
+
 def _cycle_job_ids(graph: dict[str, set[str]]) -> list[str]:
     index = 0
     indices: dict[str, int] = {}
@@ -485,14 +525,15 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
     )
     style_token = _active_token(style_asset)
 
-    characters = [
+    all_characters = _objects(data, "characters", "character_id")
+    media_characters = [
         character
-        for character in _objects(data, "characters", "character_id")
+        for character in all_characters
         if character.get("importance") in {"lead", "major"}
     ]
     character_assets: dict[str, dict[str, Any]] = {}
     character_jobs: dict[str, dict[str, Any] | None] = {}
-    for character in characters:
+    for character in media_characters:
         character_id = str(character["character_id"])
         name = str(character.get("name", character_id))
         asset, job = require(
@@ -513,7 +554,7 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         character_jobs[character_id] = job
 
     for kind in ("expression_sheet", "action_sheet"):
-        for character in characters:
+        for character in media_characters:
             character_id = str(character["character_id"])
             base_asset = character_assets[character_id]
             base_token = _active_token(base_asset)
@@ -573,8 +614,10 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
 
     voice_assets: dict[str, dict[str, Any]] = {}
     voice_jobs: dict[str, dict[str, Any] | None] = {}
-    characters_by_id = {str(character["character_id"]): character for character in characters}
-    for character in characters:
+    characters_by_id = {
+        str(character["character_id"]): character for character in all_characters
+    }
+    for character in media_characters:
         character_id = str(character["character_id"])
         name = str(character.get("name", character_id))
         profile = character.get("voice_profile")
@@ -719,49 +762,28 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 speaker_id = line["speaker_id"]
                 if speaker_id not in characters_by_id:
                     raise MediaJobError(
-                        f"{shot_id} dialogue speaker has no lead/major voice: {speaker_id}"
+                        f"{shot_id} dialogue speaker is unknown: {speaker_id}"
                     )
-                dialogue_asset_id = (
-                    f"DIALOGUE_{shot_id}_L{line_number:03d}"
+                speaker = characters_by_id[speaker_id]
+                profile = speaker.get("voice_profile")
+                if not isinstance(profile, dict):
+                    raise MediaJobError(
+                        f"{speaker_id} dialogue speaker requires voice_profile"
+                    )
+                dialogue_asset_id = f"DIALOGUE_{shot_id}_L{line_number:03d}"
+                selected, completed = _resolve_dialogue_asset(
+                    assets,
+                    asset_id=dialogue_asset_id,
+                    shot_id=shot_id,
+                    text=line["text"],
                 )
-                matching = [
-                    asset
-                    for asset in assets
-                    if asset.get("asset_id") == dialogue_asset_id
-                    and asset.get("asset_type") == "dialogue_audio"
-                ]
-                usable = [
-                    asset for asset in matching if asset.get("status") != "discarded"
-                ]
-                selected = max(
-                    usable,
-                    key=lambda asset: _positive_version(asset.get("version")) or 0,
-                    default=None,
-                )
-                if selected is not None and selected.get("status") == "completed":
+                if completed:
                     continue
-                version = (
-                    _positive_version(selected.get("version"))
-                    if selected is not None
-                    else 1
-                ) or 1
-                if selected is None:
-                    file_name = f"{dialogue_asset_id}_V{version:03d}.wav"
-                    selected = {
-                        "asset_id": dialogue_asset_id,
-                        "version": version,
-                        "asset_type": "dialogue_audio",
-                        "owner_id": shot_id,
-                        "reference_token": (
-                            f"@声音_{dialogue_asset_id}_对白_V{version:03d}"
-                        ),
-                        "file_name": file_name,
-                        "relative_path": f"assets/audio/dialogue/{file_name}",
-                        "prompt": line["text"],
-                    }
-                voice_asset = voice_assets[speaker_id]
-                voice_token = _active_token(voice_asset)
-                voice_job = voice_jobs[speaker_id]
+                voice_asset = voice_assets.get(speaker_id)
+                voice_token = (
+                    _active_token(voice_asset) if voice_asset is not None else None
+                )
+                voice_job = voice_jobs.get(speaker_id)
                 jobs.append(
                     _job_for_asset(
                         selected,
@@ -775,12 +797,17 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                             ),
                             "speaker_id": speaker_id,
                             "text": line["text"],
-                            "voice_asset_id": voice_asset.get("asset_id"),
+                            "voice_profile": dict(profile),
+                            "voice_asset_id": (
+                                voice_asset.get("asset_id")
+                                if voice_asset is not None
+                                else None
+                            ),
                             "voice_reference_token": voice_token,
                             "built_in_voice": "coral",
                             "delivery_instructions": _delivery_instructions(
-                                characters_by_id[speaker_id]["voice_profile"],
-                                str(characters_by_id[speaker_id].get("name", speaker_id)),
+                                profile,
+                                str(speaker.get("name", speaker_id)),
                             ),
                             "ai_generated": True,
                         },
