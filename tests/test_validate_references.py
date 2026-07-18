@@ -126,6 +126,75 @@ def test_unknown_reference_token_is_rejected(valid_project: dict[str, Any]) -> N
     )
 
 
+@pytest.mark.parametrize(
+    "separator",
+    [
+        "、",
+        "/",
+        "—",
+        "“",
+        "”",
+        "‘",
+        "’",
+        '"',
+        "'",
+        "【",
+        "】",
+        "[",
+        "]",
+        "（",
+        "）",
+        "(",
+        ")",
+        "，",
+        ",",
+        "。",
+        ".",
+        "：",
+        ":",
+        "；",
+        ";",
+        "？",
+        "?",
+        "！",
+        "!",
+        "\n",
+    ],
+)
+def test_unknown_reference_token_stops_before_any_non_token_character(
+    valid_project: dict[str, Any], separator: str
+) -> None:
+    unknown_token = "@未知-token_123"
+    trailing_narrative = "后续叙事"
+    for field in ("prompt_zh", "prompt_en"):
+        shot(valid_project)[field] += (
+            f" {unknown_token}{separator}{trailing_narrative}"
+        )
+
+    errors = validate_references(valid_project)
+    unknown_errors = [
+        error for error in errors if "unknown reference token:" in error
+    ]
+
+    assert len(unknown_errors) == 2
+    assert all(
+        error.endswith(f"unknown reference token: {unknown_token}")
+        for error in unknown_errors
+    )
+    assert all(trailing_narrative not in error for error in unknown_errors)
+
+
+def test_registered_reference_tokens_may_contain_hyphens(
+    valid_project: dict[str, Any],
+) -> None:
+    hyphenated = "@角色_C001_林-岚_综合设定图_V001"
+    valid_project["assets"][1]["reference_token"] = hyphenated
+    for episode_index in range(3):
+        replace_in_both(shot(valid_project, episode_index), CHAR_V1, hyphenated)
+
+    assert validate_references(valid_project) == []
+
+
 def test_chinese_and_english_token_sets_must_match(
     valid_project: dict[str, Any],
 ) -> None:

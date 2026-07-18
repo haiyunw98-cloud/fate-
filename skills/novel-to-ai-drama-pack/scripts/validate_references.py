@@ -10,9 +10,9 @@ from typing import Any, Sequence
 from project_io import load_json
 
 
-_TOKEN_END = re.compile(r"_V\d{3}")
-_TOKEN_BOUNDARY = frozenset(
-    " \t\r\n,.;:?!，。；：？！[]{}()<>（）【】〈〉《》「」『』〔〕〖〗'\"‘’“”"
+_UNKNOWN_TOKEN = re.compile(
+    r"@[A-Za-z0-9_\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    r"\U00020000-\U0002fa1f-]+"
 )
 _REFERENCE_SPECS = (
     ("prop_ids", "props", "prop_id", "prop_sheet"),
@@ -160,16 +160,10 @@ def _scan_tokens(prompt: str, known_tokens: set[str]) -> tuple[set[str], set[str
             position = start + len(matched)
             continue
 
-        boundary = start + 1
-        while boundary < len(prompt) and prompt[boundary] not in _TOKEN_BOUNDARY:
-            boundary += 1
-        candidate = prompt[start:boundary]
-        version_end = _TOKEN_END.search(candidate)
-        if version_end is not None:
-            candidate = candidate[: version_end.end()]
-        if candidate:
-            unknown.add(candidate)
-        position = max(boundary, start + 1)
+        unknown_match = _UNKNOWN_TOKEN.match(prompt, start)
+        candidate = unknown_match.group() if unknown_match is not None else "@"
+        unknown.add(candidate)
+        position = unknown_match.end() if unknown_match is not None else start + 1
     return found, unknown
 
 
