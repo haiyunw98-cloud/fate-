@@ -4,7 +4,7 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Sequence
 
 from project_io import load_json
@@ -67,6 +67,12 @@ _ASSET_STATUSES = {
 _PROJECT_STATUSES = _ASSET_STATUSES | {"core_assets_confirmed", "production"}
 _MEDIA_GATE_STATUSES = {"core_assets_confirmed", "production", "completed"}
 _SCRIPT_GATE_STATUSES = {"production", "completed"}
+_IMPORTANCE_VALUES = {
+    "character": {"lead", "major", "minor", "cameo"},
+    "scene": {"important", "secondary"},
+    "prop": {"important", "secondary"},
+    "food": {"important", "secondary"},
+}
 
 
 def _is_integer(value: object) -> bool:
@@ -83,9 +89,47 @@ def _is_nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _contains_delimited_id(value: str, owner_id: str) -> bool:
-    pattern = rf"(?<![A-Za-z0-9]){re.escape(owner_id)}(?![A-Za-z0-9])"
-    return re.search(pattern, value) is not None
+def _contains_owner_component(
+    value: str, owner_id: str, *, is_file_name: bool
+) -> bool:
+    if is_file_name:
+        name = PurePosixPath(value.replace("\\", "/")).name
+        text = name.rsplit(".", 1)[0]
+    else:
+        text = value[1:] if value.startswith("@") else value
+    components = text.split("_")
+    owner_components = owner_id.split("_")
+    width = len(owner_components)
+    return any(
+        components[index : index + width] == owner_components
+        for index in range(len(components) - width + 1)
+    )
+
+
+def _single_line(value: str) -> str:
+    return value.replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _validate_completed_path(
+    relative_path: str,
+    file_name: str | None,
+    path: str,
+    errors: list[str],
+) -> None:
+    posix_path = PurePosixPath(relative_path)
+    windows_path = PureWindowsPath(relative_path)
+    unsafe = (
+        posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    )
+    if unsafe:
+        errors.append(f"{path}.relative_path must be relative and confined")
+    normalized_name = PurePosixPath(relative_path.replace("\\", "/")).name
+    if file_name is not None and normalized_name != file_name:
+        errors.append(f"{path}.relative_path basename must equal file_name")
 
 
 def _require_object(
@@ -154,10 +198,8 @@ def _validate_generation_settings(
     for field in ("aspect_ratio", "image_provider", "voice_provider"):
         _require_nonempty_string(settings, field, "generation_settings", errors)
     sample_count = settings.get("sample_episode_count")
-    if not _is_integer(sample_count) or sample_count < 0:
-        errors.append(
-            "generation_settings.sample_episode_count must be a nonnegative integer"
-        )
+    if not _is_integer(sample_count) or sample_count != 1:
+        errors.append("generation_settings.sample_episode_count must be exactly 1")
     script_count = settings.get("script_episode_count")
     if not _is_integer(script_count) or script_count <= 0:
         errors.append(
@@ -196,7 +238,9 @@ def _validate_named_objects(
             ids.add(object_id)
             all_object_ids.add(object_id)
         _require_nonempty_string(item, "name", path, errors)
-        _require_nonempty_string(item, "importance", path, errors)
+        importance = _require_nonempty_string(item, "importance", path, errors)
+        if importance is not None and importance not in _IMPORTANCE_VALUES[kind]:
+            errors.append(f"{path}.importance is not allowed: {importance}")
 
         if kind == "character":
             _require_nonempty_string(item, "role", path, errors)
@@ -352,6 +396,7 @@ def _validate_assets(
     assets: list[dict[str, Any]] = []
     asset_ids: set[str] = set()
     asset_keys: set[tuple[str, int]] = set()
+    versions_by_asset_id: dict[str, set[int]] = {}
     tokens: set[str] = set()
 
     for index, raw_asset in enumerate(raw_assets):
@@ -379,6 +424,7 @@ def _validate_assets(
                     f"duplicate asset (asset_id, version): {asset_id}, {version}"
                 )
             asset_keys.add(key)
+            versions_by_asset_id.setdefault(asset_id, set()).add(version)
 
         asset_type = asset.get("asset_type")
         if not _is_nonempty_string(asset_type):
@@ -426,12 +472,12 @@ def _validate_assets(
                 errors.append(f"{path} asset version does not match reference_token")
 
         if owner_id is not None:
-            if file_name is not None and not _contains_delimited_id(
-                file_name, owner_id
+            if file_name is not None and not _contains_owner_component(
+                file_name, owner_id, is_file_name=True
             ):
                 errors.append(f"{path}.file_name must include owner_id {owner_id}")
-            if reference_token is not None and not _contains_delimited_id(
-                reference_token, owner_id
+            if reference_token is not None and not _contains_owner_component(
+                reference_token, owner_id, is_file_name=False
             ):
                 errors.append(f"{path}.reference_token must include owner_id {owner_id}")
 
@@ -443,8 +489,11 @@ def _validate_assets(
         if not isinstance(status, str) or status not in _ASSET_STATUSES:
             errors.append(f"{path}.status is not allowed: {status}")
         if status == "completed":
-            if not _is_nonempty_string(asset.get("relative_path")):
+            relative_path = asset.get("relative_path")
+            if not _is_nonempty_string(relative_path):
                 errors.append(f"{path}.relative_path must be nonempty when completed")
+            else:
+                _validate_completed_path(relative_path, file_name, path, errors)
             checksum = asset.get("checksum")
             if not isinstance(checksum, str) or not _CHECKSUM.fullmatch(checksum):
                 errors.append(
@@ -463,6 +512,13 @@ def _validate_assets(
                     errors.append(
                         f"{path}.file extension is invalid for {asset_type}"
                     )
+
+    for asset_id in sorted(versions_by_asset_id):
+        versions = versions_by_asset_id[asset_id]
+        if versions != set(range(1, max(versions) + 1)):
+            errors.append(
+                f"asset version history for {asset_id} must start at 1 and be contiguous"
+            )
 
     for index, asset in enumerate(assets):
         parent_ids = asset.get("parent_asset_ids")
@@ -485,7 +541,6 @@ def _validate_media_gate(
     foods: list[dict[str, Any]],
     episodes: list[dict[str, Any]],
     assets: list[dict[str, Any]],
-    sample_count: object,
     errors: list[str],
 ) -> None:
     if project_status not in _MEDIA_GATE_STATUSES:
@@ -512,7 +567,7 @@ def _validate_media_gate(
 
     for character in characters:
         importance = character.get("importance")
-        if not isinstance(importance, str) or importance not in {"lead", "major"}:
+        if importance in {"minor", "cameo"}:
             continue
         owner_id = character.get("character_id")
         if not isinstance(owner_id, str):
@@ -526,13 +581,13 @@ def _validate_media_gate(
             if (asset_type, "character", owner_id) not in completed:
                 errors.append(f"missing completed {asset_type} for {owner_id}")
 
-    for items, importance, id_field, asset_type, owner_type in (
-        (scenes, "important", "scene_id", "scene_sheet", "scene"),
-        (props, "important", "prop_id", "prop_sheet", "prop"),
-        (foods, "important", "food_id", "food_image", "food"),
+    for items, id_field, asset_type, owner_type in (
+        (scenes, "scene_id", "scene_sheet", "scene"),
+        (props, "prop_id", "prop_sheet", "prop"),
+        (foods, "food_id", "food_image", "food"),
     ):
         for item in items:
-            if item.get("importance") != importance:
+            if item.get("importance") == "secondary":
                 continue
             owner_id = item.get(id_field)
             if isinstance(owner_id, str) and (
@@ -542,9 +597,7 @@ def _validate_media_gate(
             ) not in completed:
                 errors.append(f"missing completed {asset_type} for {owner_id}")
 
-    if not _is_integer(sample_count) or sample_count < 0:
-        return
-    for episode in episodes[:sample_count]:
+    for episode in episodes[:1]:
         shots = episode.get("shots")
         if not isinstance(shots, list):
             continue
@@ -603,7 +656,7 @@ def validate_project(data: dict[str, Any]) -> list[str]:
     errors.extend(f"missing top-level key: {key}" for key in missing)
     errors.extend(f"unexpected top-level key: {key}" for key in unexpected)
     if missing:
-        return errors
+        return [_single_line(error) for error in errors]
 
     if data.get("schema_version") != "1.0.0":
         errors.append("schema_version must be 1.0.0")
@@ -714,7 +767,7 @@ def validate_project(data: dict[str, Any]) -> list[str]:
         "food": food_ids,
         "shot": shot_ids,
     }
-    assets, asset_ids = _validate_assets(data.get("assets"), errors, owner_ids)
+    assets, _asset_ids = _validate_assets(data.get("assets"), errors, owner_ids)
 
     for episode_index, episode in enumerate(episodes):
         shots = episode.get("shots")
@@ -723,12 +776,30 @@ def validate_project(data: dict[str, Any]) -> list[str]:
         for shot_index, shot in enumerate(shots):
             if not isinstance(shot, dict):
                 continue
-            for field in ("expression_asset_id", "action_asset_id"):
+            character_ids = {
+                character_id
+                for character_id in shot.get("character_ids", [])
+                if isinstance(character_id, str)
+            } if isinstance(shot.get("character_ids"), list) else set()
+            for field, expected_type in (
+                ("expression_asset_id", "expression_sheet"),
+                ("action_asset_id", "action_sheet"),
+            ):
                 linked_id = shot.get(field)
-                if isinstance(linked_id, str) and linked_id not in asset_ids:
+                if linked_id is None or not isinstance(linked_id, str):
+                    continue
+                if not any(
+                    asset.get("asset_id") == linked_id
+                    and asset.get("asset_type") == expected_type
+                    and asset.get("status") == "completed"
+                    and isinstance(asset.get("owner_id"), str)
+                    and asset.get("owner_id") in character_ids
+                    for asset in assets
+                ):
                     errors.append(
                         f"episodes[{episode_index}].shots[{shot_index}].{field} "
-                        f"unknown asset reference: {linked_id}"
+                        f"must reference a completed {expected_type} owned by a shot "
+                        "character"
                     )
 
     _validate_media_gate(
@@ -740,11 +811,10 @@ def validate_project(data: dict[str, Any]) -> list[str]:
         foods,
         episodes,
         assets,
-        sample_count,
         errors,
     )
     _validate_script_gate(project_status, episodes, script_count, errors)
-    return errors
+    return [_single_line(error) for error in errors]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -755,7 +825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         data = load_json(args.project)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        print(_single_line(f"ERROR: {error}"), file=sys.stderr)
         return 1
 
     errors = validate_project(data)

@@ -56,6 +56,43 @@ def test_duplicate_object_id_is_rejected(valid_project: dict[str, Any]) -> None:
     assert_has_error(validate_project(valid_project), "duplicate object id: C001")
 
 
+@pytest.mark.parametrize(
+    ("collection", "importance", "expected"),
+    [
+        ("characters", "hero", "characters[0].importance is not allowed: hero"),
+        ("scenes", "primary", "scenes[0].importance is not allowed: primary"),
+        ("props", "primary", "props[0].importance is not allowed: primary"),
+        ("foods", "primary", "foods[0].importance is not allowed: primary"),
+    ],
+)
+def test_importance_values_are_collection_specific(
+    valid_project: dict[str, Any],
+    collection: str,
+    importance: str,
+    expected: str,
+) -> None:
+    valid_project[collection][0]["importance"] = importance
+
+    assert_has_error(validate_project(valid_project), expected)
+
+
+def test_invalid_character_importance_cannot_bypass_media_gate(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["characters"][0]["importance"] = "leed"
+    for asset in valid_project["assets"]:
+        if asset["owner_type"] == "character":
+            asset["status"] = "discarded"
+
+    errors = validate_project(valid_project)
+
+    assert_has_error(errors, "characters[0].importance is not allowed: leed")
+    assert_has_error(errors, "missing completed character_sheet for C001")
+    assert_has_error(errors, "missing completed expression_sheet for C001")
+    assert_has_error(errors, "missing completed action_sheet for C001")
+    assert_has_error(errors, "missing completed voice_sample for C001")
+
+
 def test_asset_filename_version_must_match(valid_project: dict[str, Any]) -> None:
     valid_project["assets"][0]["file_name"] = "STYLE_PRJ001_V002.png"
 
@@ -85,6 +122,37 @@ def test_duplicate_asset_key_and_reference_token_are_rejected(
     assert_has_error(
         errors,
         "duplicate asset reference_token: @项目_PRJ001_测试短剧_风格参考图_V001",
+    )
+
+
+def test_asset_version_history_must_start_at_one(
+    valid_project: dict[str, Any],
+) -> None:
+    asset = valid_project["assets"][0]
+    asset["version"] = 2
+    asset["file_name"] = "STYLE_PRJ001_V002.png"
+    asset["relative_path"] = "assets/style/STYLE_PRJ001_V002.png"
+    asset["reference_token"] = "@项目_PRJ001_测试短剧_风格参考图_V002"
+
+    assert_has_error(
+        validate_project(valid_project),
+        "asset version history for STYLE_PRJ001 must start at 1 and be contiguous",
+    )
+
+
+def test_asset_version_history_must_not_have_gaps(
+    valid_project: dict[str, Any],
+) -> None:
+    asset = copy.deepcopy(valid_project["assets"][0])
+    asset["version"] = 3
+    asset["file_name"] = "STYLE_PRJ001_V003.png"
+    asset["relative_path"] = "assets/style/STYLE_PRJ001_V003.png"
+    asset["reference_token"] = "@项目_PRJ001_测试短剧_风格参考图_V003"
+    valid_project["assets"].append(asset)
+
+    assert_has_error(
+        validate_project(valid_project),
+        "asset version history for STYLE_PRJ001 must start at 1 and be contiguous",
     )
 
 
@@ -138,6 +206,47 @@ def test_completed_asset_requires_valid_output_metadata(
 
 
 @pytest.mark.parametrize(
+    "relative_path",
+    [
+        "/tmp/STYLE_PRJ001_V001.png",
+        "../../STYLE_PRJ001_V001.png",
+        "..\\STYLE_PRJ001_V001.png",
+        "C:\\assets\\STYLE_PRJ001_V001.png",
+        "\\\\server\\share\\STYLE_PRJ001_V001.png",
+    ],
+)
+def test_completed_asset_path_must_be_relative_and_confined(
+    valid_project: dict[str, Any], relative_path: str
+) -> None:
+    valid_project["assets"][0]["relative_path"] = relative_path
+
+    assert_has_error(
+        validate_project(valid_project),
+        "assets[0].relative_path must be relative and confined",
+    )
+
+
+def test_completed_asset_path_basename_must_equal_file_name(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["assets"][0]["relative_path"] = "assets/style/OTHER_V001.png"
+
+    assert_has_error(
+        validate_project(valid_project),
+        "assets[0].relative_path basename must equal file_name",
+    )
+
+
+def test_existing_nested_asset_paths_remain_valid(
+    valid_project: dict[str, Any],
+) -> None:
+    assert valid_project["assets"][0]["relative_path"] == (
+        "assets/style/STYLE_PRJ001_V001.png"
+    )
+    assert validate_project(valid_project) == []
+
+
+@pytest.mark.parametrize(
     ("asset_type", "owner_id", "expected"),
     [
         ("character_sheet", "C001", "missing completed character_sheet for C001"),
@@ -185,6 +294,18 @@ def test_only_sample_episodes_require_shot_samples(valid_project: dict[str, Any]
     )
 
     assert validate_project(valid_project) == []
+
+
+@pytest.mark.parametrize("sample_count", [0, 2, False])
+def test_sample_episode_count_must_be_exactly_one(
+    valid_project: dict[str, Any], sample_count: Any
+) -> None:
+    valid_project["generation_settings"]["sample_episode_count"] = sample_count
+
+    assert_has_error(
+        validate_project(valid_project),
+        "generation_settings.sample_episode_count must be exactly 1",
+    )
 
 
 def test_target_episode_count_must_equal_episode_count(
@@ -334,6 +455,101 @@ def test_existing_delimited_owner_id_patterns_remain_valid(
     assert validate_project(valid_project) == []
 
 
+def test_unicode_adjacent_owner_id_is_not_a_delimited_component(
+    valid_project: dict[str, Any],
+) -> None:
+    asset = valid_project["assets"][1]
+    asset["file_name"] = "CHAR_甲C001乙_V001.png"
+    asset["reference_token"] = "@角色_甲C001乙_林岚_综合设定图_V001"
+
+    errors = validate_project(valid_project)
+
+    assert_has_error(errors, "assets[1].file_name must include owner_id C001")
+    assert_has_error(errors, "assets[1].reference_token must include owner_id C001")
+
+
+def test_valid_shot_expression_and_action_links_resolve(
+    valid_project: dict[str, Any],
+) -> None:
+    shot = valid_project["episodes"][0]["shots"][0]
+    shot["expression_asset_id"] = "EXPR_C001"
+    shot["action_asset_id"] = "ACTION_C001"
+
+    assert validate_project(valid_project) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "expected_type"),
+    [
+        ("expression_asset_id", "expression_sheet"),
+        ("action_asset_id", "action_sheet"),
+    ],
+)
+def test_shot_asset_link_requires_correct_asset_type(
+    valid_project: dict[str, Any], field: str, expected_type: str
+) -> None:
+    valid_project["episodes"][0]["shots"][0][field] = "STYLE_PRJ001"
+
+    assert_has_error(
+        validate_project(valid_project),
+        f"episodes[0].shots[0].{field} must reference a completed {expected_type} "
+        "owned by a shot character",
+    )
+
+
+def test_shot_asset_link_owner_must_be_a_shot_character(
+    valid_project: dict[str, Any],
+) -> None:
+    character = copy.deepcopy(valid_project["characters"][0])
+    character["character_id"] = "C002"
+    character["name"] = "旁观者"
+    character["importance"] = "minor"
+    valid_project["characters"].append(character)
+    asset = copy.deepcopy(valid_project["assets"][2])
+    asset["asset_id"] = "EXPR_C002"
+    asset["owner_id"] = "C002"
+    asset["file_name"] = "EXPR_C002_V001.png"
+    asset["relative_path"] = "assets/characters/EXPR_C002_V001.png"
+    asset["reference_token"] = "@角色_C002_旁观者_表情设定图_V001"
+    valid_project["assets"].append(asset)
+    valid_project["episodes"][0]["shots"][0]["expression_asset_id"] = "EXPR_C002"
+
+    assert_has_error(
+        validate_project(valid_project),
+        "episodes[0].shots[0].expression_asset_id must reference a completed "
+        "expression_sheet owned by a shot character",
+    )
+
+
+def test_shot_asset_link_requires_completed_status(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["assets"][2]["status"] = "discarded"
+    valid_project["episodes"][0]["shots"][0]["expression_asset_id"] = "EXPR_C001"
+
+    assert_has_error(
+        validate_project(valid_project),
+        "episodes[0].shots[0].expression_asset_id must reference a completed "
+        "expression_sheet owned by a shot character",
+    )
+
+
+def test_malformed_linked_asset_owner_returns_errors_without_raising(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["assets"][2]["owner_id"] = {}
+    valid_project["episodes"][0]["shots"][0]["expression_asset_id"] = "EXPR_C001"
+
+    errors = validate_project(valid_project)
+
+    assert_has_error(errors, "assets[2].owner_id must be a nonempty string")
+    assert_has_error(
+        errors,
+        "episodes[0].shots[0].expression_asset_id must reference a completed "
+        "expression_sheet owned by a shot character",
+    )
+
+
 def test_cli_prints_valid_and_exits_zero() -> None:
     result = subprocess.run(
         [sys.executable, str(SCRIPT_PATH), str(FIXTURE_PATH)],
@@ -363,6 +579,28 @@ def test_cli_prints_validation_errors_one_per_line(
 
     assert result.returncode == 1
     assert result.stdout.splitlines() == ["schema_version must be 1.0.0"]
+    assert result.stderr == ""
+
+
+def test_cli_escapes_newlines_in_dynamic_validation_values(
+    valid_project: dict[str, Any], tmp_path: Path
+) -> None:
+    valid_project["assets"][0]["status"] = "completed\r\nforged"
+    errors = validate_project(valid_project)
+    path = tmp_path / "newline-status.json"
+    path.write_text(json.dumps(valid_project, ensure_ascii=False), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert all("\r" not in error and "\n" not in error for error in errors)
+    assert_has_error(errors, "completed\\r\\nforged")
+    assert result.returncode == 1
+    assert result.stdout.splitlines() == errors
     assert result.stderr == ""
 
 
