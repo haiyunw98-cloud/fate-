@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import project_io
 from project_io import atomic_write_json, load_json, next_version, sha256_file
 
 
@@ -39,14 +40,50 @@ def test_load_json_rejects_non_object_root(tmp_path: Path) -> None:
         load_json(path)
 
 
-def test_atomic_write_json_removes_temp_file_when_serialization_fails(tmp_path: Path) -> None:
+def test_atomic_write_json_preserves_original_and_removes_temp_file_on_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "project.json"
+    original = {"title": "原始项目"}
+    path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
 
-    with pytest.raises(TypeError):
-        atomic_write_json(path, {"invalid": {1, 2}})
+    def partially_write_then_interrupt(*args: object, **kwargs: object) -> None:
+        target = args[1]
+        target.write('{"incomplete":')
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(project_io.json, "dump", partially_write_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        atomic_write_json(path, {"replacement": "不会写入"})
 
     assert not list(tmp_path.glob("*.tmp"))
-    assert not path.exists()
+    assert load_json(path) == original
+
+
+@pytest.mark.skipif(project_io.os.name != "posix", reason="directory fsync is POSIX-specific")
+def test_atomic_write_json_fsyncs_parent_directory_after_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    original_replace = project_io.os.replace
+    original_fsync = project_io.os.fsync
+
+    def record_replace(source: object, destination: object) -> None:
+        events.append("replace")
+        original_replace(source, destination)
+
+    def record_fsync(file_descriptor: int) -> None:
+        events.append("fsync")
+        original_fsync(file_descriptor)
+
+    monkeypatch.setattr(project_io.os, "replace", record_replace)
+    monkeypatch.setattr(project_io.os, "fsync", record_fsync)
+
+    atomic_write_json(tmp_path / "project.json", {"title": "已保存"})
+
+    assert events.index("replace") < len(events) - 1
+    assert events[-1] == "fsync"
 
 
 def test_project_template_has_canonical_shape() -> None:
@@ -74,5 +111,40 @@ def test_project_template_has_canonical_shape() -> None:
         "generation_settings",
         "generation_runs",
     ]
-    assert template["generation_settings"]["sample_episode_count"] == 1
-    assert template["generation_settings"]["script_episode_count"] == 3
+    assert template == {
+        "schema_version": "1.0.0",
+        "project": {
+            "project_id": "PRJ001",
+            "title": "未命名项目",
+            "status": "draft",
+            "target_episode_count": 1,
+        },
+        "source": {
+            "input_type": "pasted_text",
+            "file_name": None,
+            "sha256": "uninitialized",
+            "character_count": 0,
+            "chapter_index": [],
+            "coverage": 0.0,
+        },
+        "analysis": {
+            "world_bible": "未生成",
+            "timeline": [],
+            "story_arc": [],
+            "adaptation_decisions": [],
+        },
+        "characters": [],
+        "scenes": [],
+        "props": [],
+        "foods": [],
+        "episodes": [],
+        "assets": [],
+        "generation_settings": {
+            "aspect_ratio": "9:16",
+            "image_provider": "built_in_image_gen",
+            "voice_provider": "openai_speech",
+            "sample_episode_count": 1,
+            "script_episode_count": 3,
+        },
+        "generation_runs": [],
+    }

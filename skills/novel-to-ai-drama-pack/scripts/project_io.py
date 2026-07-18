@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -8,12 +9,33 @@ from pathlib import Path
 from typing import Any
 
 
+_UNSUPPORTED_DIRECTORY_SYNC_ERRNOS = {errno.EACCES, errno.EINVAL, errno.ENOTSUP, errno.EPERM}
+if hasattr(errno, "EOPNOTSUPP"):
+    _UNSUPPORTED_DIRECTORY_SYNC_ERRNOS.add(errno.EOPNOTSUPP)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+
+    directory_fd: int | None = None
+    try:
+        directory_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        os.fsync(directory_fd)
+    except OSError as error:
+        if error.errno not in _UNSUPPORTED_DIRECTORY_SYNC_ERRNOS:
+            raise
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -27,6 +49,7 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
             target.flush()
             os.fsync(target.fileno())
         os.replace(temporary_path, path)
+        _fsync_directory(path.parent)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
