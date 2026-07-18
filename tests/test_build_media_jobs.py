@@ -99,6 +99,29 @@ def test_media_jobs_reject_forged_asset_history_identity(
         build_media_jobs(valid_project)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("asset_type", None),
+        ("asset_type", "   "),
+        ("owner_type", None),
+        ("owner_type", "   "),
+        ("owner_id", None),
+        ("owner_id", "   "),
+    ],
+)
+def test_media_jobs_require_complete_identity_on_every_asset_version(
+    valid_project: dict[str, Any], field: str, value: object
+) -> None:
+    valid_project["assets"][1][field] = value
+
+    with pytest.raises(
+        MediaJobError,
+        match=rf"assets\[1\]\.{field} must be a nonempty string",
+    ):
+        build_media_jobs(valid_project)
+
+
 def test_media_jobs_accept_legal_redo_v003_as_active_version(
     valid_project: dict[str, Any],
 ) -> None:

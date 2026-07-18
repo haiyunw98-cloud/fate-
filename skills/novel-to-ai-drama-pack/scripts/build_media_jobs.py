@@ -129,8 +129,11 @@ def _assets(data: dict[str, Any]) -> list[dict[str, Any]]:
         )
         for field in ("asset_type", "owner_type", "owner_id"):
             value = asset.get(field)
-            if _nonempty(value):
-                identity_values[field].add(str(value))
+            if not _nonempty(value):
+                raise MediaJobError(
+                    f"assets[{index}].{field} must be a nonempty string"
+                )
+            identity_values[field].add(str(value))
         result.append(asset)
     for asset_id in sorted(identity_values_by_asset_id):
         identity_values = identity_values_by_asset_id[asset_id]
