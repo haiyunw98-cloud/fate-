@@ -4,16 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
+import stat
 import sys
 import tempfile
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Sequence
 
-from build_media_jobs import MediaJobError, build_media_jobs
+from build_media_jobs import build_media_jobs
 from project_io import _fsync_directory, load_json
 from validate_project import validate_project
 from validate_references import validate_references
@@ -29,6 +32,7 @@ _MARKER = {
     "export_format": "novel-to-ai-drama-pack",
     "format_version": 1,
 }
+_CHECKSUM = re.compile(r"^[0-9a-f]{64}$")
 _OUTPUT_NAMES = {
     "project_md": "project.md",
     "shots_xlsx": "shots.xlsx",
@@ -59,6 +63,243 @@ def _display(value: object) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _formal_contract_errors(data: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    settings = data.get("generation_settings")
+    script_count = settings.get("script_episode_count") if isinstance(settings, dict) else None
+    if (
+        not isinstance(script_count, int)
+        or isinstance(script_count, bool)
+        or script_count != 3
+    ):
+        errors.append(
+            "generation_settings.script_episode_count must be exactly 3 for formal export"
+        )
+
+    episodes = data.get("episodes")
+    expected_ids = ["E001", "E002", "E003"]
+    if not isinstance(episodes, list) or len(episodes) < 3:
+        errors.append("first three episodes must be E001, E002, E003 in canonical order")
+        return errors
+    actual_ids = [
+        episode.get("episode_id") if isinstance(episode, dict) else None
+        for episode in episodes[:3]
+    ]
+    if actual_ids != expected_ids:
+        errors.append("first three episodes must be E001, E002, E003 in canonical order")
+
+    for index, episode in enumerate(episodes[:3]):
+        episode_id = expected_ids[index]
+        if not isinstance(episode, dict):
+            errors.append(f"{episode_id} must be an object for formal export")
+            continue
+        script = episode.get("script")
+        if not isinstance(script, str) or not script.strip():
+            errors.append(f"{episode_id}.script must be nonempty for formal export")
+        shots = episode.get("shots")
+        if not isinstance(shots, list) or not shots:
+            errors.append(f"{episode_id}.shots must be nonempty for formal export")
+
+    first_episode = episodes[0]
+    if not isinstance(first_episode, dict):
+        return errors
+    shots = first_episode.get("shots")
+    if not isinstance(shots, list):
+        return errors
+    character_ids = {
+        character.get("character_id")
+        for character in data.get("characters", [])
+        if isinstance(character, dict)
+        and isinstance(character.get("character_id"), str)
+    } if isinstance(data.get("characters"), list) else set()
+    for shot_index, shot in enumerate(shots):
+        fallback_id = f"E001_SH{shot_index + 1:03d}"
+        shot_id = shot.get("shot_id", fallback_id) if isinstance(shot, dict) else fallback_id
+        if not isinstance(shot, dict):
+            continue
+        if "dialogue_lines" not in shot:
+            errors.append(
+                f"{shot_id}.dialogue_lines must be explicitly present; [] means no dialogue"
+            )
+            continue
+        lines = shot.get("dialogue_lines")
+        if not isinstance(lines, list):
+            errors.append(f"{shot_id}.dialogue_lines must be a list")
+            continue
+        for line_index, line in enumerate(lines):
+            path = f"{shot_id}.dialogue_lines[{line_index}]"
+            if not isinstance(line, dict):
+                errors.append(f"{path} must be an object")
+                continue
+            speaker_id = line.get("speaker_id")
+            text = line.get("text")
+            if not isinstance(speaker_id, str) or not speaker_id.strip():
+                errors.append(f"{path}.speaker_id must be a nonempty string")
+            elif speaker_id not in character_ids:
+                errors.append(f"{path}.speaker_id is unknown: {_single_line(speaker_id)}")
+            if not isinstance(text, str) or not text.strip():
+                errors.append(f"{path}.text must be a nonempty string")
+    return errors
+
+
+def _confined_media_parts(relative_path: object) -> tuple[str, ...] | None:
+    if not isinstance(relative_path, str) or not relative_path.strip() or "\x00" in relative_path:
+        return None
+    posix = PurePosixPath(relative_path.replace("\\", "/"))
+    windows = PureWindowsPath(relative_path)
+    if (
+        posix.is_absolute()
+        or windows.is_absolute()
+        or bool(windows.drive)
+        or ".." in posix.parts
+        or ".." in windows.parts
+    ):
+        return None
+    parts = tuple(part for part in posix.parts if part not in {"", "."})
+    return parts or None
+
+
+def _hash_media_without_following_symlinks(
+    project_root: Path,
+    parts: tuple[str, ...],
+) -> str:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(project_root, directory_flags)
+    opened_directories: list[int] = [directory_fd]
+    file_fd: int | None = None
+    try:
+        for component in parts[:-1]:
+            directory_fd = os.open(
+                component,
+                directory_flags | no_follow,
+                dir_fd=directory_fd,
+            )
+            opened_directories.append(directory_fd)
+        file_fd = os.open(
+            parts[-1],
+            os.O_RDONLY | no_follow,
+            dir_fd=directory_fd,
+        )
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("media path is not a regular file")
+        digest = hashlib.sha256()
+        while chunk := os.read(file_fd, 1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(file_fd)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise OSError("media file changed while hashing")
+        return digest.hexdigest()
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for opened_fd in reversed(opened_directories):
+            os.close(opened_fd)
+
+
+def _physical_media_errors(data: dict[str, Any], project_path: Path) -> list[str]:
+    errors: list[str] = []
+    try:
+        project_root = project_path.expanduser().resolve(strict=True).parent
+    except OSError as error:
+        return [f"cannot resolve project root for media verification: {_single_line(error)}"]
+    assets = data.get("assets")
+    if not isinstance(assets, list):
+        return ["assets must be a list for physical media verification"]
+
+    for index, asset in enumerate(assets):
+        if not isinstance(asset, dict) or asset.get("status") != "completed":
+            continue
+        label = str(asset.get("asset_id") or f"assets[{index}]")
+        parts = _confined_media_parts(asset.get("relative_path"))
+        if parts is None:
+            errors.append(f"{label} media relative_path is not confined")
+            continue
+        media_path = project_root.joinpath(*parts)
+        component = project_root
+        component_error = False
+        for part in parts[:-1]:
+            component = component / part
+            try:
+                component_status = component.lstat()
+            except FileNotFoundError:
+                errors.append(f"{label} media file is missing: {media_path}")
+                component_error = True
+                break
+            except OSError as error:
+                errors.append(f"{label} media path cannot be inspected: {_single_line(error)}")
+                component_error = True
+                break
+            if stat.S_ISLNK(component_status.st_mode):
+                errors.append(f"{label} media path has a symbolic link component: {component}")
+                component_error = True
+                break
+            if not stat.S_ISDIR(component_status.st_mode):
+                errors.append(f"{label} media path component is not a directory: {component}")
+                component_error = True
+                break
+        if component_error:
+            continue
+        try:
+            media_status = media_path.lstat()
+        except FileNotFoundError:
+            errors.append(f"{label} media file is missing: {media_path}")
+            continue
+        except OSError as error:
+            errors.append(f"{label} media file cannot be inspected: {_single_line(error)}")
+            continue
+        if stat.S_ISLNK(media_status.st_mode):
+            errors.append(f"{label} media file is a symbolic link: {media_path}")
+            continue
+        if not stat.S_ISREG(media_status.st_mode):
+            errors.append(f"{label} media path must be a regular file: {media_path}")
+            continue
+        try:
+            resolved_media = media_path.resolve(strict=True)
+            resolved_media.relative_to(project_root)
+        except (OSError, ValueError):
+            errors.append(f"{label} resolved media path escapes project root: {media_path}")
+            continue
+        expected_checksum = asset.get("checksum")
+        if not isinstance(expected_checksum, str) or not _CHECKSUM.fullmatch(expected_checksum):
+            errors.append(f"{label} checksum must be 64 lowercase hexadecimal characters")
+            continue
+        try:
+            actual_checksum = _hash_media_without_following_symlinks(project_root, parts)
+        except OSError as error:
+            errors.append(f"{label} media file cannot be safely read: {_single_line(error)}")
+            continue
+        if actual_checksum != expected_checksum:
+            errors.append(
+                f"{label} checksum mismatch: expected {expected_checksum}, got {actual_checksum}"
+            )
+    return errors
+
+
+def _dialogue_text(shot: dict[str, Any]) -> str:
+    lines = shot.get("dialogue_lines")
+    if not isinstance(lines, list):
+        return ""
+    return "\n".join(
+        f"{line['speaker_id']}：{line['text']}"
+        for line in lines
+        if isinstance(line, dict)
+        and isinstance(line.get("speaker_id"), str)
+        and isinstance(line.get("text"), str)
+    )
 
 
 def _warnings(data: dict[str, Any]) -> list[str]:
@@ -197,6 +438,19 @@ def _project_markdown(data: dict[str, Any], warnings: Sequence[str]) -> str:
                 "",
             ]
         )
+        for shot in episode.get("shots", []):
+            if not isinstance(shot, dict):
+                continue
+            dialogue = _dialogue_text(shot)
+            if dialogue:
+                lines.extend(
+                    [
+                        f"- {shot.get('shot_id', '未知镜头')}对白：",
+                        "",
+                        dialogue,
+                        "",
+                    ]
+                )
 
     lines.extend(["## 非阻断警告", ""])
     if warnings:
@@ -218,7 +472,7 @@ def _shot_rows(data: dict[str, Any]) -> list[list[object]]:
                     shot["shot_id"],
                     ", ".join(shot.get("character_ids", [])),
                     shot.get("scene_id", ""),
-                    _display(shot.get("dialogue")),
+                    _dialogue_text(shot),
                     _camera_text(shot),
                     shot.get("prompt_zh", ""),
                     shot.get("prompt_en", ""),
@@ -245,6 +499,7 @@ def _prompts_text(data: dict[str, Any]) -> str:
                     f"### {shot['shot_id']}",
                     f"中文：{shot.get('prompt_zh', '')}",
                     f"English: {shot.get('prompt_en', '')}",
+                    f"对白：{_dialogue_text(shot) or '无'}",
                     f"负面：{shot.get('negative_prompt', '')}",
                     "精确引用：" + " ".join(_shot_tokens(shot, registered)),
                     "",
@@ -468,6 +723,7 @@ def export_package(project_path: Path, output_dir: Path) -> dict[str, Path]:
         validation_errors.append(
             "project.status must be completed for formal export"
         )
+    validation_errors.extend(_formal_contract_errors(data))
     try:
         pending_jobs = build_media_jobs(data)
         if pending_jobs:
@@ -475,8 +731,9 @@ def export_package(project_path: Path, output_dir: Path) -> dict[str, Path]:
                 "formal export has pending required media jobs: "
                 + ", ".join(str(job.get("job_id", "<unknown>")) for job in pending_jobs)
             )
-    except (MediaJobError, ValueError) as error:
+    except Exception as error:
         validation_errors.append(f"media readiness validation failed: {_single_line(error)}")
+    validation_errors.extend(_physical_media_errors(data, Path(project_path)))
     if validation_errors:
         raise ExportError(
             "project validation failed:\n" + "\n".join(validation_errors)

@@ -40,13 +40,31 @@ def valid_project() -> dict[str, Any]:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
+def _materialize_completed_assets(root: Path, data: dict[str, Any]) -> None:
+    for asset in data["assets"]:
+        if asset.get("status") != "completed":
+            continue
+        content = (
+            f"{asset['asset_id']}:V{asset['version']:03d}:formal-media\n"
+        ).encode("utf-8")
+        media_path = root / asset["relative_path"]
+        media_path.parent.mkdir(parents=True, exist_ok=True)
+        media_path.write_bytes(content)
+        asset["checksum"] = hashlib.sha256(content).hexdigest()
+
+
+def _write_formal_project(path: Path, data: dict[str, Any]) -> None:
+    _materialize_completed_assets(path.parent, data)
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture
 def project_path(tmp_path: Path, valid_project: dict[str, Any]) -> Path:
     path = tmp_path / "project.json"
-    path.write_text(
-        json.dumps(valid_project, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_formal_project(path, valid_project)
     return path
 
 
@@ -211,6 +229,202 @@ def test_formal_export_blocks_missing_first_episode_dialogue_audio(
     )
 
     with pytest.raises(ExportError, match="pending required media jobs.*DIALOGUE"):
+        export_package(project_path, tmp_path / "export")
+
+    assert not (tmp_path / "export").exists()
+
+
+def test_formal_export_requires_explicit_dialogue_lines_on_every_e001_shot(
+    project_path: Path, tmp_path: Path, valid_project: dict[str, Any]
+) -> None:
+    del valid_project["episodes"][0]["shots"][0]["dialogue_lines"]
+    project_path.write_text(
+        json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
+    )
+
+    with pytest.raises(ExportError, match=r"E001_SH001\.dialogue_lines must be explicitly present"):
+        export_package(project_path, tmp_path / "export")
+
+    assert not (tmp_path / "export").exists()
+
+
+@pytest.mark.parametrize(
+    "dialogue_lines",
+    [
+        {},
+        ["not an object"],
+        [{"speaker_id": "", "text": "台词"}],
+        [{"speaker_id": "C999", "text": "台词"}],
+        [{"speaker_id": "C001", "text": "  "}],
+    ],
+)
+def test_formal_export_rejects_malformed_e001_dialogue_contract(
+    project_path: Path,
+    tmp_path: Path,
+    valid_project: dict[str, Any],
+    dialogue_lines: object,
+) -> None:
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = dialogue_lines
+    project_path.write_text(
+        json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
+    )
+
+    with pytest.raises(ExportError, match="dialogue_lines"):
+        export_package(project_path, tmp_path / "export")
+
+
+def test_empty_dialogue_lines_is_an_explicit_no_dialogue_contract(
+    project_path: Path, tmp_path: Path
+) -> None:
+    outputs = export_package(project_path, tmp_path / "export")
+    rows = _sheet_rows(outputs["shots_xlsx"])
+    assert rows[1][4] == ""
+
+
+def test_completed_dialogue_audio_exports_canonical_dialogue_to_xlsx(
+    project_path: Path, tmp_path: Path, valid_project: dict[str, Any]
+) -> None:
+    text = "你终于来了。"
+    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C001", "text": text}
+    ]
+    valid_project["assets"].append(
+        {
+            "asset_id": "DIALOGUE_E001_SH001_L001",
+            "version": 1,
+            "asset_type": "dialogue_audio",
+            "owner_type": "shot",
+            "owner_id": "E001_SH001",
+            "reference_token": "@声音_DIALOGUE_E001_SH001_L001_对白_V001",
+            "file_name": "DIALOGUE_E001_SH001_L001_V001.wav",
+            "relative_path": "assets/audio/dialogue/DIALOGUE_E001_SH001_L001_V001.wav",
+            "checksum": "0" * 64,
+            "prompt": text,
+            "speaker_id": "C001",
+            "parent_asset_ids": ["AUD_C001"],
+            "status": "completed",
+        }
+    )
+    _write_formal_project(project_path, valid_project)
+
+    outputs = export_package(project_path, tmp_path / "export")
+    rows = _sheet_rows(outputs["shots_xlsx"])
+
+    assert rows[1][4] == f"C001：{text}"
+    assert f"C001：{text}" in outputs["prompts"].read_text(encoding="utf-8")
+    assert f"C001：{text}" in outputs["project_md"].read_text(encoding="utf-8")
+
+
+def test_formal_export_aggregates_missing_and_checksum_mismatched_media(
+    project_path: Path, tmp_path: Path, valid_project: dict[str, Any]
+) -> None:
+    first, second = valid_project["assets"][:2]
+    (tmp_path / first["relative_path"]).unlink()
+    (tmp_path / second["relative_path"]).write_bytes(b"tampered")
+
+    with pytest.raises(ExportError) as caught:
+        export_package(project_path, tmp_path / "export")
+
+    message = str(caught.value)
+    assert first["asset_id"] in message and "missing" in message
+    assert second["asset_id"] in message and "checksum mismatch" in message
+    assert not (tmp_path / "export").exists()
+
+
+def test_formal_export_rejects_media_path_that_is_a_directory(
+    project_path: Path, tmp_path: Path, valid_project: dict[str, Any]
+) -> None:
+    asset = valid_project["assets"][0]
+    media_path = tmp_path / asset["relative_path"]
+    media_path.unlink()
+    media_path.mkdir()
+
+    with pytest.raises(ExportError, match=f"{asset['asset_id']}.*regular file"):
+        export_package(project_path, tmp_path / "export")
+
+
+def test_formal_export_rejects_symlink_media_file_even_when_bytes_match(
+    project_path: Path, tmp_path: Path, valid_project: dict[str, Any]
+) -> None:
+    asset = valid_project["assets"][0]
+    media_path = tmp_path / asset["relative_path"]
+    target = tmp_path / "outside-media.bin"
+    target.write_bytes(media_path.read_bytes())
+    media_path.unlink()
+    media_path.symlink_to(target)
+
+    with pytest.raises(ExportError, match=f"{asset['asset_id']}.*symbolic link"):
+        export_package(project_path, tmp_path / "export")
+
+
+def test_formal_export_rejects_symlink_media_path_component(
+    project_path: Path, tmp_path: Path, valid_project: dict[str, Any]
+) -> None:
+    asset = next(
+        item for item in valid_project["assets"] if item["asset_type"] == "scene_sheet"
+    )
+    media_path = tmp_path / asset["relative_path"]
+    real_directory = tmp_path / "outside-scenes"
+    real_directory.mkdir()
+    moved = real_directory / media_path.name
+    media_path.replace(moved)
+    media_path.parent.rmdir()
+    media_path.parent.symlink_to(real_directory, target_is_directory=True)
+
+    with pytest.raises(ExportError, match=f"{asset['asset_id']}.*symbolic link component"):
+        export_package(project_path, tmp_path / "export")
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    ["../outside.png", "/tmp/outside.png", r"C:\outside.png"],
+)
+def test_formal_export_rejects_unconfined_media_metadata(
+    project_path: Path,
+    tmp_path: Path,
+    valid_project: dict[str, Any],
+    unsafe_path: str,
+) -> None:
+    asset = valid_project["assets"][0]
+    asset["relative_path"] = unsafe_path
+    project_path.write_text(
+        json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
+    )
+
+    with pytest.raises(ExportError) as caught:
+        export_package(project_path, tmp_path / "export")
+
+    assert f"{asset['asset_id']} media relative_path is not confined" in str(caught.value)
+    assert not (tmp_path / "export").exists()
+
+
+@pytest.mark.parametrize("script_count", [1, 2, 4])
+def test_formal_export_requires_exactly_three_script_episodes(
+    project_path: Path,
+    tmp_path: Path,
+    valid_project: dict[str, Any],
+    script_count: int,
+) -> None:
+    valid_project["generation_settings"]["script_episode_count"] = script_count
+    project_path.write_text(
+        json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
+    )
+
+    with pytest.raises(ExportError, match="script_episode_count must be exactly 3"):
+        export_package(project_path, tmp_path / "export")
+
+
+def test_formal_export_requires_first_three_canonical_episodes(
+    project_path: Path, tmp_path: Path, valid_project: dict[str, Any]
+) -> None:
+    valid_project["episodes"] = valid_project["episodes"][:2]
+    valid_project["project"]["target_episode_count"] = 2
+    valid_project["generation_settings"]["script_episode_count"] = 2
+    project_path.write_text(
+        json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
+    )
+
+    with pytest.raises(ExportError, match="first three episodes must be E001, E002, E003"):
         export_package(project_path, tmp_path / "export")
 
     assert not (tmp_path / "export").exists()
@@ -449,7 +663,7 @@ def test_cli_failure_uses_stderr_without_traceback(
     assert "missing.json" in result.stderr
 
 
-def test_manifest_checksum_is_not_recomputed_or_forged(
+def test_manifest_preserves_the_physically_verified_checksum(
     project_path: Path, tmp_path: Path
 ) -> None:
     outputs = export_package(project_path, tmp_path / "export")
@@ -459,4 +673,5 @@ def test_manifest_checksum_is_not_recomputed_or_forged(
     style = next(
         asset for asset in manifest["assets"] if asset["asset_id"] == "STYLE_PRJ001"
     )
-    assert style["checksum"] == "1" * 64
+    media = project_path.parent / style["relative_path"]
+    assert style["checksum"] == hashlib.sha256(media.read_bytes()).hexdigest()
