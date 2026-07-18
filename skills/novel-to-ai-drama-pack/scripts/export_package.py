@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""Validate and atomically export an AI short-drama production package."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any, Sequence
+
+from build_media_jobs import MediaJobError, build_media_jobs
+from project_io import _fsync_directory, load_json
+from validate_project import validate_project
+from validate_references import validate_references
+from xlsx_writer import write_xlsx
+
+
+class ExportError(RuntimeError):
+    """Raised when validation, staging, or publication cannot complete safely."""
+
+
+_MARKER_NAME = ".novel-to-ai-drama-pack-export.json"
+_MARKER = {
+    "export_format": "novel-to-ai-drama-pack",
+    "format_version": 1,
+}
+_OUTPUT_NAMES = {
+    "project_md": "project.md",
+    "shots_xlsx": "shots.xlsx",
+    "prompts": "video-prompts.txt",
+    "media_manifest": "media-manifest.json",
+    "validation_report": "validation-report.txt",
+}
+def _single_line(value: object) -> str:
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _write_text(path: Path, text: str) -> None:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    with path.open("w", encoding="utf-8", newline="\n") as target:
+        target.write(normalized)
+
+
+def _write_json(path: Path, value: object) -> None:
+    _write_text(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def _display(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _warnings(data: dict[str, Any]) -> list[str]:
+    result: list[str] = []
+    raw_warnings = data.get("warnings", [])
+    if isinstance(raw_warnings, list):
+        result.extend(_single_line(item) for item in raw_warnings if str(item).strip())
+    elif raw_warnings is not None and str(raw_warnings).strip():
+        result.append(_single_line(raw_warnings))
+
+    for asset in data.get("assets", []):
+        if not isinstance(asset, dict) or asset.get("status") in {"completed", "discarded"}:
+            continue
+        result.append(
+            f"asset {asset.get('asset_id', '<unknown>')} V"
+            f"{asset.get('version', '?')} is {asset.get('status', '<unknown>')}"
+        )
+    return result
+
+
+def _registered_tokens(data: dict[str, Any]) -> list[str]:
+    tokens = {
+        asset["reference_token"]
+        for asset in data.get("assets", [])
+        if isinstance(asset, dict)
+        and isinstance(asset.get("reference_token"), str)
+        and asset["reference_token"]
+    }
+    return sorted(tokens, key=lambda token: (-len(token), token))
+
+
+def _shot_tokens(shot: dict[str, Any], registered: Sequence[str]) -> list[str]:
+    prompts = [
+        shot.get("prompt_zh", ""),
+        shot.get("prompt_en", ""),
+    ]
+    first_positions: dict[str, tuple[int, int]] = {}
+    for prompt_index, prompt in enumerate(prompts):
+        if not isinstance(prompt, str):
+            continue
+        for token in registered:
+            position = prompt.find(token)
+            if position >= 0:
+                first_positions.setdefault(token, (prompt_index, position))
+    return sorted(
+        first_positions,
+        key=lambda token: (*first_positions[token], token),
+    )
+
+
+def _camera_text(shot: dict[str, Any]) -> str:
+    fields = (
+        "shot_size",
+        "camera",
+        "camera_height",
+        "camera_angle",
+        "camera_movement",
+        "lens",
+        "composition",
+    )
+    values = [f"{field}: {_display(shot[field])}" for field in fields if shot.get(field) not in (None, "", [])]
+    return " | ".join(values)
+
+
+def _project_markdown(data: dict[str, Any], warnings: Sequence[str]) -> str:
+    project = data["project"]
+    analysis = data["analysis"]
+    lines = [
+        f"# {project['title']}",
+        "",
+        "## 项目状态",
+        "",
+        f"- 项目ID：{project['project_id']}",
+        f"- 完成状态：{project['status']}",
+        f"- 目标集数：{project['target_episode_count']}",
+        "",
+        "## 故事圣经",
+        "",
+        _display(analysis.get("world_bible")),
+        "",
+        "### 时间线",
+        "",
+        _display(analysis.get("timeline")) or "无",
+        "",
+        "### 故事结构",
+        "",
+        _display(analysis.get("story_arc")) or "无",
+        "",
+        "### 改编决策",
+        "",
+        _display(analysis.get("adaptation_decisions")) or "无",
+        "",
+        "## 资产表",
+        "",
+        "| 资产ID | 版本 | 类型 | 所属 | 状态 | 引用名 | 相对路径 |",
+        "|---|---:|---|---|---|---|---|",
+    ]
+    for asset in sorted(
+        data["assets"],
+        key=lambda item: (str(item.get("asset_id", "")), int(item.get("version", 0))),
+    ):
+        values = [
+            asset.get("asset_id", ""),
+            asset.get("version", ""),
+            asset.get("asset_type", ""),
+            asset.get("owner_id", ""),
+            asset.get("status", ""),
+            asset.get("reference_token", ""),
+            asset.get("relative_path", ""),
+        ]
+        escaped = [str(value).replace("|", "\\|").replace("\n", "<br>") for value in values]
+        lines.append("| " + " | ".join(escaped) + " |")
+
+    lines.extend(["", "## 角色声音档案", ""])
+    for character in data["characters"]:
+        profile = character.get("voice_profile", {})
+        lines.extend(
+            [
+                f"### {character['character_id']} {character['name']}",
+                "",
+                f"- 声线：{_display(profile.get('voice'))}",
+                f"- 语气：{_display(profile.get('tone'))}",
+                f"- 语速：{_display(profile.get('pace'))}",
+                f"- 样本文本：{_display(profile.get('sample_text'))}",
+                "",
+            ]
+        )
+
+    lines.extend(["## 前三集剧本", ""])
+    for episode in data["episodes"][:3]:
+        lines.extend(
+            [
+                f"### {episode['episode_id']} 《{episode['title']}》",
+                "",
+                _display(episode.get("script")),
+                "",
+            ]
+        )
+
+    lines.extend(["## 非阻断警告", ""])
+    if warnings:
+        lines.extend(f"- {warning}" for warning in warnings)
+    else:
+        lines.append("- 无")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _shot_rows(data: dict[str, Any]) -> list[list[object]]:
+    registered = _registered_tokens(data)
+    rows: list[list[object]] = []
+    for episode in data["episodes"][:3]:
+        for shot in episode["shots"]:
+            rows.append(
+                [
+                    episode["episode_id"],
+                    shot["shot_id"],
+                    ", ".join(shot.get("character_ids", [])),
+                    shot.get("scene_id", ""),
+                    _display(shot.get("dialogue")),
+                    _camera_text(shot),
+                    shot.get("prompt_zh", ""),
+                    shot.get("prompt_en", ""),
+                    shot.get("negative_prompt", ""),
+                    "\n".join(_shot_tokens(shot, registered)),
+                ]
+            )
+    return rows
+
+
+def _prompts_text(data: dict[str, Any]) -> str:
+    registered = _registered_tokens(data)
+    lines = [
+        "# AI 视频提示词",
+        "",
+        "说明：本文件只导出视频提示词，不生成视频。",
+        "",
+    ]
+    for episode in data["episodes"][:3]:
+        lines.extend([f"## {episode['episode_id']} 《{episode['title']}》", ""])
+        for shot in episode["shots"]:
+            lines.extend(
+                [
+                    f"### {shot['shot_id']}",
+                    f"中文：{shot.get('prompt_zh', '')}",
+                    f"English: {shot.get('prompt_en', '')}",
+                    f"负面：{shot.get('negative_prompt', '')}",
+                    "精确引用：" + " ".join(_shot_tokens(shot, registered)),
+                    "",
+                ]
+            )
+    return "\n".join(lines)
+
+
+def _manifest(data: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "asset_id",
+        "version",
+        "asset_type",
+        "owner_type",
+        "owner_id",
+        "file_name",
+        "relative_path",
+        "checksum",
+        "status",
+        "reference_token",
+        "parent_asset_ids",
+    )
+    assets = [
+        {field: asset.get(field) for field in fields}
+        for asset in sorted(
+            data["assets"],
+            key=lambda item: (str(item.get("asset_id", "")), int(item.get("version", 0))),
+        )
+    ]
+    return {
+        "project_id": data["project"]["project_id"],
+        "assets": assets,
+    }
+
+
+def _validation_report(warnings: Sequence[str]) -> str:
+    lines = [
+        "Novel to AI Drama Pack validation report",
+        "Errors: 0",
+        f"Warnings: {len(warnings)}",
+    ]
+    lines.extend(f"WARNING: {warning}" for warning in warnings)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_all(data: dict[str, Any], stage: Path) -> dict[str, Path]:
+    warnings = _warnings(data)
+    outputs = {key: stage / name for key, name in _OUTPUT_NAMES.items()}
+    _write_text(outputs["project_md"], _project_markdown(data, warnings))
+    write_xlsx(
+        outputs["shots_xlsx"],
+        (
+            "剧集ID",
+            "镜头ID",
+            "角色ID",
+            "场景ID",
+            "对白",
+            "摄影机",
+            "中文视频提示词",
+            "英文视频提示词",
+            "负面提示词",
+            "精确素材引用",
+        ),
+        _shot_rows(data),
+        sheet_name="AI视频分镜",
+        widths=(12, 18, 18, 14, 28, 28, 60, 60, 36, 60),
+    )
+    _write_text(outputs["prompts"], _prompts_text(data))
+    _write_json(outputs["media_manifest"], _manifest(data))
+    _write_text(outputs["validation_report"], _validation_report(warnings))
+    _write_json(stage / _MARKER_NAME, _MARKER)
+    return outputs
+
+
+def _path_contains(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _prepare_paths(project_path: Path, output_dir: Path) -> tuple[Path, Path]:
+    lexical_source = Path(os.path.abspath(str(project_path.expanduser())))
+    lexical_requested = Path(os.path.abspath(str(output_dir.expanduser())))
+    if _path_contains(lexical_requested, lexical_source):
+        raise ExportError(
+            "output destination contains the source project path and cannot be replaced: "
+            f"{lexical_requested}"
+        )
+    source = project_path.expanduser().resolve(strict=True)
+    requested = output_dir.expanduser()
+    if not requested.is_absolute():
+        requested = Path.cwd() / requested
+    if requested.is_symlink():
+        raise ExportError(f"output destination is a symbolic link: {requested}")
+    parent = requested.parent
+    if parent.is_symlink():
+        raise ExportError(f"output parent is a symbolic link: {parent}")
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise ExportError(f"cannot prepare output parent: {_single_line(error)}") from error
+    parent = parent.resolve(strict=True)
+    requested = parent / requested.name
+    if _path_contains(requested, source):
+        raise ExportError(
+            f"output destination contains the source project and cannot be replaced: {requested}"
+        )
+    if requested.exists() and not requested.is_dir():
+        try:
+            if os.path.samefile(requested, source):
+                raise ExportError("output destination aliases the source project")
+        except OSError:
+            pass
+    return source, requested
+
+
+def _is_managed_export(path: Path) -> bool:
+    if not path.is_dir() or path.is_symlink():
+        return False
+    marker = path / _MARKER_NAME
+    if not marker.is_file() or marker.is_symlink():
+        return False
+    try:
+        return json.loads(marker.read_text(encoding="utf-8")) == _MARKER
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
+def _versioned_sibling(requested: Path) -> Path:
+    for version in range(1, 10000):
+        candidate = requested.with_name(f"{requested.name}-v{version:03d}")
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    raise ExportError(f"cannot allocate versioned export sibling for {requested}")
+
+
+def _safe_remove_created_directory(path: Path, parent: Path, prefix: str) -> None:
+    if path.parent != parent or not path.name.startswith(prefix):
+        raise ExportError(f"refusing unsafe cleanup outside export parent: {path}")
+    if path.is_symlink():
+        raise ExportError(f"refusing to clean symbolic-link workspace: {path}")
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def _publish_new(stage: Path, target: Path) -> Path:
+    if target.exists() or target.is_symlink():
+        target = _versioned_sibling(target)
+    os.replace(stage, target)
+    try:
+        _fsync_directory(target.parent)
+    except BaseException:
+        _safe_remove_created_directory(target, target.parent, target.name)
+        raise
+    return target
+
+
+def _publish_managed(stage: Path, destination: Path) -> Path:
+    parent = destination.parent
+    backup = parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
+    if backup.exists() or backup.is_symlink():
+        raise ExportError(f"cannot allocate managed export backup: {backup}")
+    os.replace(destination, backup)
+    stage_published = False
+    try:
+        os.replace(stage, destination)
+        stage_published = True
+        _fsync_directory(parent)
+    except BaseException:
+        try:
+            if stage_published:
+                _safe_remove_created_directory(destination, parent, destination.name)
+            os.replace(backup, destination)
+            _fsync_directory(parent)
+        except BaseException as restore_error:
+            raise ExportError(
+                "managed export publication failed and backup restoration also failed: "
+                + _single_line(restore_error)
+            )
+        raise
+    _safe_remove_created_directory(backup, parent, f".{destination.name}.backup-")
+    _fsync_directory(parent)
+    return destination
+
+
+def _publish_atomically(stage: Path, requested: Path) -> Path:
+    if requested.is_symlink():
+        raise ExportError(f"output destination is a symbolic link: {requested}")
+    if requested.exists():
+        if _is_managed_export(requested):
+            return _publish_managed(stage, requested)
+        return _publish_new(stage, _versioned_sibling(requested))
+    return _publish_new(stage, requested)
+
+
+def export_package(project_path: Path, output_dir: Path) -> dict[str, Path]:
+    """Validate, stage, and atomically publish the five formal export files."""
+    try:
+        data = load_json(Path(project_path))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise ExportError(
+            f"cannot load project {project_path}: {_single_line(error)}"
+        ) from error
+
+    validation_errors: list[str] = []
+    try:
+        validation_errors.extend(validate_project(data))
+    except Exception as error:
+        validation_errors.append(
+            f"project validation failed internally: {_single_line(error)}"
+        )
+    try:
+        validation_errors.extend(validate_references(data))
+    except Exception as error:
+        validation_errors.append(f"reference validation failed: {_single_line(error)}")
+    project = data.get("project")
+    if not isinstance(project, dict) or project.get("status") != "completed":
+        validation_errors.append(
+            "project.status must be completed for formal export"
+        )
+    try:
+        pending_jobs = build_media_jobs(data)
+        if pending_jobs:
+            validation_errors.append(
+                "formal export has pending required media jobs: "
+                + ", ".join(str(job.get("job_id", "<unknown>")) for job in pending_jobs)
+            )
+    except (MediaJobError, ValueError) as error:
+        validation_errors.append(f"media readiness validation failed: {_single_line(error)}")
+    if validation_errors:
+        raise ExportError(
+            "project validation failed:\n" + "\n".join(validation_errors)
+        )
+
+    try:
+        _source, requested = _prepare_paths(Path(project_path), Path(output_dir))
+    except (OSError, RuntimeError) as error:
+        if isinstance(error, ExportError):
+            raise
+        raise ExportError(f"unsafe export path: {_single_line(error)}") from error
+
+    stage_path: Path | None = None
+    published: Path | None = None
+    prefix = f".{requested.name}.staging-"
+    try:
+        stage_path = Path(tempfile.mkdtemp(prefix=prefix, dir=requested.parent))
+        _write_all(data, stage_path)
+        published = _publish_atomically(stage_path, requested)
+        stage_path = None
+    except ExportError:
+        raise
+    except Exception as error:
+        raise ExportError(f"export failed: {_single_line(error)}") from error
+    finally:
+        if stage_path is not None and stage_path.exists():
+            try:
+                _safe_remove_created_directory(stage_path, requested.parent, prefix)
+            except Exception as cleanup_error:
+                if sys.exc_info()[0] is None:
+                    raise ExportError(
+                        f"export staging cleanup failed: {_single_line(cleanup_error)}"
+                    ) from cleanup_error
+
+    assert published is not None
+    return {
+        key: (published / name).resolve(strict=True)
+        for key, name in _OUTPUT_NAMES.items()
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Export a validated novel-to-AI-drama production package."
+    )
+    parser.add_argument("project", type=Path, metavar="PROJECT_JSON")
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        outputs = export_package(args.project, args.output_dir)
+    except ExportError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    for key in _OUTPUT_NAMES:
+        print(outputs[key])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
