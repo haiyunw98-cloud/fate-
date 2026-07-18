@@ -1,0 +1,4 @@
+interface:
+  display_name: "小说转 AI 短剧素材包"
+  short_description: "将完整小说转换为短剧剧本、资产图片、声音和分镜提示词"
+  default_prompt: "读取完整小说，建立统一资产库，生成短剧素材包并校验所有引用。"
