@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import heapq
 import json
 import os
+import re
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from project_io import atomic_write_json, load_json
-from validate_references import _scan_tokens
+from validate_references import _scan_tokens, validate_references
 
 
 class MediaJobError(ValueError):
@@ -54,6 +56,7 @@ _ASSET_PREFIXES = {
     "shot_sample": "SHOT",
     "voice_sample": "AUD",
 }
+_CONTENT_FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _nonempty(value: object) -> bool:
@@ -242,6 +245,83 @@ def _required_stage_assets(
         forced_asset_id=forced_asset_id,
     )
     return [generated]
+
+
+def _stage_episode_range(
+    asset: dict[str, Any], label: str
+) -> tuple[int, int] | None:
+    value = asset.get("episode_range")
+    if value is None:
+        return None
+    if not (
+        isinstance(value, list)
+        and len(value) == 2
+        and all(
+            isinstance(item, int) and not isinstance(item, bool) and item > 0
+            for item in value
+        )
+        and value[0] <= value[1]
+    ):
+        raise MediaJobError(f"{label} has invalid episode_range")
+    return value[0], value[1]
+
+
+def _resolve_stage_parent(
+    child: dict[str, Any],
+    parents: list[dict[str, Any]],
+    *,
+    parent_kind: str,
+) -> dict[str, Any]:
+    child_label = (
+        f"{child.get('asset_id')} V{_positive_version(child.get('version')) or 0:03d}"
+    )
+    candidates = [
+        parent for parent in parents if parent.get("status") != "discarded"
+    ]
+    if not candidates:
+        raise MediaJobError(f"{child_label} has no matching {parent_kind} parent")
+
+    child_range = _stage_episode_range(child, child_label)
+    parent_ranges = {
+        id(parent): _stage_episode_range(
+            parent,
+            f"{parent.get('asset_id')} "
+            f"V{_positive_version(parent.get('version')) or 0:03d}",
+        )
+        for parent in candidates
+    }
+    if child_range is not None:
+        exact = [
+            parent for parent in candidates if parent_ranges[id(parent)] == child_range
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            raise MediaJobError(f"ambiguous {parent_kind} parent for {child_label}")
+        covering = []
+        for parent in candidates:
+            parent_range = parent_ranges[id(parent)]
+            if parent_range is None or (
+                parent_range[0] <= child_range[0]
+                and parent_range[1] >= child_range[1]
+            ):
+                covering.append(parent)
+        if len(covering) == 1:
+            return covering[0]
+        if len(covering) > 1:
+            raise MediaJobError(f"ambiguous {parent_kind} parent for {child_label}")
+        raise MediaJobError(f"{child_label} has no matching {parent_kind} parent")
+
+    global_parents = [
+        parent for parent in candidates if parent_ranges[id(parent)] is None
+    ]
+    if len(global_parents) == 1:
+        return global_parents[0]
+    if len(global_parents) > 1:
+        raise MediaJobError(f"ambiguous {parent_kind} parent for {child_label}")
+    if len(candidates) == 1:
+        return candidates[0]
+    raise MediaJobError(f"ambiguous {parent_kind} parent for {child_label}")
 
 
 def _asset_output(asset: dict[str, Any], kind: str) -> dict[str, str]:
@@ -555,6 +635,50 @@ def _validate_shot_reference_tokens(
     return tokens_by_field["prompt_zh"]
 
 
+def _validate_shared_inline_references(
+    data: dict[str, Any],
+    *,
+    required_assets: Iterable[dict[str, Any]],
+    important_prop_ids: set[str],
+    important_food_ids: set[str],
+) -> None:
+    validation_data = copy.deepcopy(data)
+    raw_assets = validation_data["assets"]
+    asset_indexes = {
+        (str(asset["asset_id"]), int(asset["version"])): index
+        for index, asset in enumerate(raw_assets)
+    }
+    for required in required_assets:
+        if required.get("status") == "discarded":
+            continue
+        registered = copy.deepcopy(required)
+        registered["status"] = "completed"
+        identity = (str(registered["asset_id"]), int(registered["version"]))
+        if identity in asset_indexes:
+            raw_assets[asset_indexes[identity]] = registered
+        else:
+            asset_indexes[identity] = len(raw_assets)
+            raw_assets.append(registered)
+
+    validation_data["episodes"] = [validation_data["episodes"][0]]
+    for episode in validation_data["episodes"]:
+        for shot in episode["shots"]:
+            shot["prop_ids"] = [
+                prop_id
+                for prop_id in shot["prop_ids"]
+                if str(prop_id) in important_prop_ids
+            ]
+            shot["food_ids"] = [
+                food_id
+                for food_id in shot["food_ids"]
+                if str(food_id) in important_food_ids
+            ]
+
+    errors = validate_references(validation_data)
+    if errors:
+        raise MediaJobError(errors[0])
+
+
 def _resolve_dialogue_asset(
     assets: list[dict[str, Any]],
     *,
@@ -572,9 +696,13 @@ def _resolve_dialogue_asset(
         and _positive_version(asset.get("version")) is not None
     ]
     if history:
+        validated_fingerprints = {
+            id(asset): _validated_dialogue_fingerprint(asset, asset_id)
+            for asset in history
+        }
         latest = max(history, key=lambda asset: int(asset["version"]))
-        recorded_fingerprint = latest.get("content_fingerprint")
-        if _nonempty(recorded_fingerprint):
+        recorded_fingerprint = validated_fingerprints[id(latest)]
+        if recorded_fingerprint is not None:
             identity_matches = recorded_fingerprint == fingerprint
         else:
             identity_matches = (
@@ -615,6 +743,31 @@ def _resolve_dialogue_asset(
         },
         False,
     )
+
+
+def _validated_dialogue_fingerprint(
+    asset: dict[str, Any], asset_id: str
+) -> str | None:
+    if "content_fingerprint" not in asset:
+        return None
+    recorded = asset.get("content_fingerprint")
+    if not isinstance(recorded, str) or not _CONTENT_FINGERPRINT.fullmatch(recorded):
+        raise MediaJobError(
+            f"{asset_id} content_fingerprint must be 64 lowercase hex characters"
+        )
+    recorded_speaker = asset.get("speaker_id")
+    recorded_text = asset.get("prompt")
+    has_speaker = _nonempty(recorded_speaker)
+    has_text = _nonempty(recorded_text)
+    if has_speaker or has_text:
+        if not (has_speaker and has_text):
+            raise MediaJobError(f"{asset_id} content_fingerprint metadata conflict")
+        metadata_fingerprint = _dialogue_content_fingerprint(
+            str(recorded_speaker), str(recorded_text)
+        )
+        if metadata_fingerprint != recorded:
+            raise MediaJobError(f"{asset_id} content_fingerprint metadata conflict")
+    return recorded
 
 
 def _dialogue_content_fingerprint(speaker_id: str, text: str) -> str:
@@ -737,18 +890,30 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
     if not _nonempty(project_id) or not _nonempty(title):
         raise MediaJobError("project requires project_id and title")
 
+    settings = data.get("generation_settings")
+    if not isinstance(settings, dict):
+        raise MediaJobError("generation_settings must be an object")
+    sample_count = settings.get("sample_episode_count")
+    if (
+        not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count != 1
+    ):
+        raise MediaJobError(
+            "generation_settings.sample_episode_count must be integer 1"
+        )
+
     assets = _assets(data)
     first_episode = _validated_first_episode(data)
-    sample_count = data.get("generation_settings", {}).get("sample_episode_count", 1)
-    if sample_count != 1:
-        raise MediaJobError("generation_settings.sample_episode_count must be exactly 1")
-    sample_shots = first_episode["shots"]
     sample_character_ids = {
         str(character_id)
-        for shot in sample_shots
+        for shot in first_episode["shots"]
         for character_id in shot["character_ids"]
     }
-    sample_scene_ids = {str(shot["scene_id"]) for shot in sample_shots}
+    sample_scene_ids = {
+        str(shot["scene_id"])
+        for shot in first_episode["shots"]
+    }
     jobs: list[dict[str, Any]] = []
     requirement_assets: dict[tuple[str, str], list[dict[str, Any]]] = {}
     requirement_jobs: dict[tuple[str, int], dict[str, Any]] = {}
@@ -763,6 +928,15 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         input_data: dict[str, Any] | None = None,
         episode_id: str | None = None,
         forced_asset_id: str | None = None,
+        asset_context: Callable[
+            [dict[str, Any]],
+            tuple[
+                Iterable[str],
+                Iterable[dict[str, Any] | None],
+                dict[str, Any] | None,
+            ],
+        ]
+        | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         key = (kind, owner_id)
         if key in requirement_assets:
@@ -782,11 +956,17 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
             forced_asset_id=forced_asset_id,
         )
         requirement_assets[key] = required
-        dependency_ids = [
-            dependency["job_id"] for dependency in dependencies if dependency is not None
-        ]
         scheduled: list[dict[str, Any]] = []
         for asset in required:
+            if asset_context is None:
+                asset_refs = list(refs)
+                asset_dependencies = list(dependencies)
+                asset_input = input_data
+            else:
+                context_refs, context_dependencies, context_input = asset_context(asset)
+                asset_refs = list(context_refs)
+                asset_dependencies = list(context_dependencies)
+                asset_input = context_input
             if asset.get("status") == "completed":
                 continue
             asset_id = asset.get("asset_id")
@@ -804,9 +984,13 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 asset,
                 kind=kind,
                 owner_id=owner_id,
-                reference_tokens=refs,
-                depends_on=dependency_ids,
-                input_data=input_data,
+                reference_tokens=asset_refs,
+                depends_on=[
+                    dependency["job_id"]
+                    for dependency in asset_dependencies
+                    if dependency is not None
+                ],
+                input_data=asset_input,
                 episode_id=episode_id,
             )
             jobs.append(job)
@@ -814,23 +998,49 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
             requirement_jobs[identity] = job
         return required, scheduled
 
-    style_assets, style_jobs = require(
+    style_assets, _ = require(
         "style_reference",
         str(project_id),
         str(title),
         input_data={
-            "provider": data.get("generation_settings", {}).get(
+            "provider": settings.get(
                 "image_provider", "built_in_image_gen"
             ),
-            "aspect_ratio": data.get("generation_settings", {}).get(
+            "aspect_ratio": settings.get(
                 "aspect_ratio", "9:16"
             ),
         },
     )
-    style_asset = max(
-        style_assets, key=lambda asset: _positive_version(asset.get("version")) or 0
-    )
-    style_token = _active_token(style_asset)
+
+    def pending_job_for(asset: dict[str, Any]) -> dict[str, Any] | None:
+        version = _positive_version(asset.get("version"))
+        return requirement_jobs.get((str(asset.get("asset_id")), version or 0))
+
+    def staged_context(
+        parent_assets: list[dict[str, Any]],
+        parent_kind: str,
+        base_input: dict[str, Any],
+        input_reference_field: str,
+    ) -> Callable[
+        [dict[str, Any]],
+        tuple[list[str], list[dict[str, Any] | None], dict[str, Any]],
+    ]:
+        def resolve(
+            child: dict[str, Any],
+        ) -> tuple[list[str], list[dict[str, Any] | None], dict[str, Any]]:
+            parent = _resolve_stage_parent(
+                child, parent_assets, parent_kind=parent_kind
+            )
+            token = _active_token(parent)
+            if token is None:
+                raise MediaJobError(
+                    f"{parent_kind} parent requires a reference_token"
+                )
+            job_input = dict(base_input)
+            job_input[input_reference_field] = token
+            return [token], [pending_job_for(parent)], job_input
+
+        return resolve
 
     all_characters = _objects(data, "characters", "character_id")
     all_scenes = _objects(data, "scenes", "scene_id")
@@ -855,48 +1065,46 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         or str(character.get("character_id")) in sample_character_ids
     ]
     character_assets: dict[str, list[dict[str, Any]]] = {}
-    character_jobs: dict[str, list[dict[str, Any]]] = {}
     for character in visual_characters:
         character_id = str(character["character_id"])
         name = str(character.get("name", character_id))
-        owner_assets, owner_jobs = require(
+        character_input = {
+            "provider": settings.get("image_provider", "built_in_image_gen"),
+            "appearance": character.get("appearance", ""),
+            "layout": "one comprehensive character sheet",
+        }
+        owner_assets, _ = require(
             "character_sheet",
             character_id,
             name,
-            refs=[style_token] if style_token else [],
-            dependencies=style_jobs,
-            input_data={
-                "provider": data.get("generation_settings", {}).get(
-                    "image_provider", "built_in_image_gen"
-                ),
-                "appearance": character.get("appearance", ""),
-                "layout": "one comprehensive character sheet",
-            },
+            asset_context=staged_context(
+                style_assets,
+                "style_reference",
+                character_input,
+                "style_reference",
+            ),
         )
         character_assets[character_id] = owner_assets
-        character_jobs[character_id] = owner_jobs
 
     for kind in ("expression_sheet", "action_sheet"):
         for character in media_characters:
             character_id = str(character["character_id"])
-            base_asset = max(
-                character_assets[character_id],
-                key=lambda asset: _positive_version(asset.get("version")) or 0,
-            )
-            base_token = _active_token(base_asset)
+            sheet_input = {
+                "provider": settings.get(
+                    "image_provider", "built_in_image_gen"
+                ),
+                "layout": "single multi-panel sheet",
+            }
             require(
                 kind,
                 character_id,
                 str(character.get("name", character_id)),
-                refs=[base_token] if base_token else [],
-                dependencies=character_jobs[character_id],
-                input_data={
-                    "provider": data.get("generation_settings", {}).get(
-                        "image_provider", "built_in_image_gen"
-                    ),
-                    "character_reference": base_token,
-                    "layout": "single multi-panel sheet",
-                },
+                asset_context=staged_context(
+                    character_assets[character_id],
+                    "character_sheet",
+                    sheet_input,
+                    "character_reference",
+                ),
             )
 
     for scene in all_scenes:
@@ -906,13 +1114,17 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         ):
             continue
         scene_id = str(scene["scene_id"])
+        scene_input = {"provider": settings.get("image_provider")}
         require(
             "scene_sheet",
             scene_id,
             str(scene.get("name", scene_id)),
-            refs=[style_token] if style_token else [],
-            dependencies=style_jobs,
-            input_data={"provider": data.get("generation_settings", {}).get("image_provider")},
+            asset_context=staged_context(
+                style_assets,
+                "style_reference",
+                scene_input,
+                "style_reference",
+            ),
         )
 
     important_prop_ids = {
@@ -924,13 +1136,17 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         if prop.get("importance") != "important":
             continue
         prop_id = str(prop["prop_id"])
+        prop_input = {"provider": settings.get("image_provider")}
         require(
             "prop_sheet",
             prop_id,
             str(prop.get("name", prop_id)),
-            refs=[style_token] if style_token else [],
-            dependencies=style_jobs,
-            input_data={"provider": data.get("generation_settings", {}).get("image_provider")},
+            asset_context=staged_context(
+                style_assets,
+                "style_reference",
+                prop_input,
+                "style_reference",
+            ),
         )
 
     important_food_ids = {
@@ -942,17 +1158,20 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         if food.get("importance") != "important":
             continue
         food_id = str(food["food_id"])
+        food_input = {"provider": settings.get("image_provider")}
         require(
             "food_image",
             food_id,
             str(food.get("name", food_id)),
-            refs=[style_token] if style_token else [],
-            dependencies=style_jobs,
-            input_data={"provider": data.get("generation_settings", {}).get("image_provider")},
+            asset_context=staged_context(
+                style_assets,
+                "style_reference",
+                food_input,
+                "style_reference",
+            ),
         )
 
-    voice_assets: dict[str, dict[str, Any]] = {}
-    voice_jobs: dict[str, list[dict[str, Any]]] = {}
+    voice_assets: dict[str, list[dict[str, Any]]] = {}
     characters_by_id = {
         str(character["character_id"]): character for character in all_characters
     }
@@ -962,12 +1181,12 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         profile = character.get("voice_profile")
         if not isinstance(profile, dict):
             raise MediaJobError(f"{character_id} requires voice_profile")
-        owner_assets, owner_jobs = require(
+        owner_assets, _ = require(
             "voice_sample",
             character_id,
             name,
             input_data={
-                "provider": data.get("generation_settings", {}).get(
+                "provider": settings.get(
                     "voice_provider", "openai_speech"
                 ),
                 "voice_profile": dict(profile),
@@ -977,11 +1196,18 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "ai_generated": True,
             },
         )
-        voice_assets[character_id] = max(
-            owner_assets,
-            key=lambda asset: _positive_version(asset.get("version")) or 0,
-        )
-        voice_jobs[character_id] = owner_jobs
+        voice_assets[character_id] = owner_assets
+
+    _validate_shared_inline_references(
+        data,
+        required_assets=(
+            asset
+            for group in requirement_assets.values()
+            for asset in group
+        ),
+        important_prop_ids=important_prop_ids,
+        important_food_ids=important_food_ids,
+    )
 
     first_episodes = [first_episode]
     all_known_tokens = {
@@ -1101,7 +1327,7 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 refs=reference_tokens,
                 dependencies=shot_dependencies,
                 input_data={
-                    "provider": data.get("generation_settings", {}).get(
+                    "provider": settings.get(
                         "image_provider", "built_in_image_gen"
                     ),
                     "prompt_zh": shot.get("prompt_zh", ""),
@@ -1134,22 +1360,36 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 )
                 if completed:
                     continue
-                voice_asset = voice_assets.get(speaker_id)
+                speaker_voice_assets = voice_assets.get(speaker_id, [])
+                voice_asset = _active_asset_for_episode(
+                    speaker_voice_assets,
+                    kind="voice_sample",
+                    owner_id=speaker_id,
+                    episode_number=episode_number,
+                )
+                if speaker_id in voice_assets and voice_asset is None:
+                    raise MediaJobError(
+                        f"{speaker_id} has no voice_sample active for E001"
+                    )
                 voice_token = (
                     _active_token(voice_asset) if voice_asset is not None else None
                 )
-                speaker_voice_jobs = voice_jobs.get(speaker_id, [])
+                active_voice_job = (
+                    pending_job_for(voice_asset) if voice_asset is not None else None
+                )
                 jobs.append(
                     _job_for_asset(
                         selected,
                         kind="dialogue_audio",
                         owner_id=shot_id,
                         reference_tokens=[voice_token] if voice_token else [],
-                        depends_on=[
-                            voice_job["job_id"] for voice_job in speaker_voice_jobs
-                        ],
+                        depends_on=(
+                            [active_voice_job["job_id"]]
+                            if active_voice_job is not None
+                            else []
+                        ),
                         input_data={
-                            "provider": data.get("generation_settings", {}).get(
+                            "provider": settings.get(
                                 "voice_provider", "openai_speech"
                             ),
                             "speaker_id": speaker_id,
