@@ -397,6 +397,7 @@ def _validate_assets(
     asset_ids: set[str] = set()
     asset_keys: set[tuple[str, int]] = set()
     versions_by_asset_id: dict[str, set[int]] = {}
+    identity_values_by_asset_id: dict[str, dict[str, set[str]]] = {}
     tokens: set[str] = set()
     redo_parents: list[tuple[str, str, int]] = []
 
@@ -448,6 +449,22 @@ def _validate_assets(
             owner_id = None
         elif expected_owner is not None and owner_id not in owner_ids[expected_owner]:
             errors.append(f"{path} unknown {expected_owner} owner_id: {owner_id}")
+
+        if asset_id is not None:
+            identity_values = identity_values_by_asset_id.setdefault(
+                asset_id,
+                {
+                    "asset_type": set(),
+                    "owner_type": set(),
+                    "owner_id": set(),
+                },
+            )
+            if asset_type is not None and expected_owner is not None:
+                identity_values["asset_type"].add(asset_type)
+            if _is_nonempty_string(owner_type):
+                identity_values["owner_type"].add(owner_type)
+            if owner_id is not None:
+                identity_values["owner_id"].add(owner_id)
 
         reference_token = asset.get("reference_token")
         if not _is_nonempty_string(reference_token):
@@ -569,6 +586,14 @@ def _validate_assets(
             errors.append(
                 f"asset version history for {asset_id} must start at 1 and be contiguous"
             )
+
+    for asset_id in sorted(identity_values_by_asset_id):
+        identity_values = identity_values_by_asset_id[asset_id]
+        for field in ("asset_type", "owner_type", "owner_id"):
+            if len(identity_values[field]) > 1:
+                errors.append(
+                    f"asset version history for {asset_id} has inconsistent {field}"
+                )
 
     for path, redo_asset_id, redo_version in redo_parents:
         if (redo_asset_id, redo_version) not in asset_keys:

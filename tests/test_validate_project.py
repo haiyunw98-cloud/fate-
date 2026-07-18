@@ -252,6 +252,53 @@ def test_redo_parent_version_must_actually_exist(
     )
 
 
+def test_asset_history_rejects_changed_asset_type(
+    valid_project: dict[str, Any],
+) -> None:
+    redo = append_redo_asset(valid_project)
+    redo["asset_type"] = "expression_sheet"
+
+    assert_has_error(
+        validate_project(valid_project),
+        "asset version history for CHAR_C001 has inconsistent asset_type",
+    )
+
+
+def test_asset_history_rejects_changed_owner_type(
+    valid_project: dict[str, Any],
+) -> None:
+    redo = append_redo_asset(valid_project)
+    redo["owner_type"] = "scene"
+
+    assert_has_error(
+        validate_project(valid_project),
+        "asset version history for CHAR_C001 has inconsistent owner_type",
+    )
+
+
+def test_asset_history_rejects_changed_valid_owner_id(
+    valid_project: dict[str, Any],
+) -> None:
+    second_character = copy.deepcopy(valid_project["characters"][0])
+    second_character.update(
+        {
+            "character_id": "C002",
+            "name": "林溪",
+            "importance": "minor",
+        }
+    )
+    valid_project["characters"].append(second_character)
+    redo = append_redo_asset(valid_project)
+    redo["owner_id"] = "C002"
+    redo["file_name"] = "CHAR_C002_V002.png"
+    redo["reference_token"] = "@角色_C002_林溪_综合设定图_V002"
+
+    assert_has_error(
+        validate_project(valid_project),
+        "asset version history for CHAR_C001 has inconsistent owner_id",
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "expected"),
     [
