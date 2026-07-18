@@ -398,6 +398,113 @@ def test_formal_export_rejects_unconfined_media_metadata(
     assert not (tmp_path / "export").exists()
 
 
+def test_formal_export_fails_closed_when_supports_dir_fd_is_missing(
+    project_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delattr(exporter.os, "supports_dir_fd")
+
+    with pytest.raises(ExportError, match="platform cannot safely verify media"):
+        export_package(project_path, tmp_path / "export")
+
+    assert not (tmp_path / "export").exists()
+    assert not list(tmp_path.glob(".export.staging-*"))
+
+
+def test_formal_export_fails_closed_when_supports_dir_fd_is_not_iterable(
+    project_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(exporter.os, "supports_dir_fd", None)
+
+    with pytest.raises(ExportError, match="platform cannot safely verify media"):
+        export_package(project_path, tmp_path / "export")
+
+    assert not (tmp_path / "export").exists()
+
+
+@pytest.mark.parametrize("flag", ["O_NOFOLLOW", "O_DIRECTORY"])
+def test_formal_export_fails_closed_without_required_open_flag(
+    project_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+) -> None:
+    monkeypatch.setattr(exporter.os, flag, 0)
+
+    with pytest.raises(ExportError, match="platform cannot safely verify media"):
+        export_package(project_path, tmp_path / "export")
+
+    assert not (tmp_path / "export").exists()
+
+
+def test_formal_export_fails_closed_when_no_follow_flag_is_missing(
+    project_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delattr(exporter.os, "O_NOFOLLOW")
+
+    with pytest.raises(ExportError, match="platform cannot safely verify media"):
+        export_package(project_path, tmp_path / "export")
+
+    assert not (tmp_path / "export").exists()
+
+
+def test_runtime_dir_fd_type_error_fails_closed_and_closes_open_fds(
+    project_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_open = exporter.os.open
+    real_close = exporter.os.close
+    opened: list[int] = []
+    closed: list[int] = []
+
+    def failing_open(
+        path: object,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is not None:
+            raise TypeError("dir_fd unsupported at runtime")
+        descriptor = real_open(path, flags, mode)
+        opened.append(descriptor)
+        return descriptor
+
+    def recording_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(exporter.os, "open", failing_open)
+    monkeypatch.setattr(exporter.os, "close", recording_close)
+    monkeypatch.setattr(exporter.os, "supports_dir_fd", {failing_open})
+
+    with pytest.raises(ExportError, match="platform cannot safely verify media"):
+        export_package(project_path, tmp_path / "export")
+
+    assert opened
+    assert sorted(opened) == sorted(closed)
+    assert not (tmp_path / "export").exists()
+    assert not list(tmp_path.glob(".export.staging-*"))
+
+
+def test_cli_fails_closed_on_unsafe_media_platform_without_traceback(
+    project_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(exporter.os, "O_NOFOLLOW", 0)
+
+    result = exporter.main(
+        [str(project_path), "--output-dir", str(tmp_path / "export")]
+    )
+    captured = capsys.readouterr()
+
+    assert result == 1
+    assert captured.out == ""
+    assert "platform cannot safely verify media" in captured.err
+    assert "Traceback" not in captured.err
+    assert not (tmp_path / "export").exists()
+
+
 @pytest.mark.parametrize("script_count", [1, 2, 4])
 def test_formal_export_requires_exactly_three_script_episodes(
     project_path: Path,

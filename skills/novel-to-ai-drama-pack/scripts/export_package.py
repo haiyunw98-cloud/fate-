@@ -27,6 +27,10 @@ class ExportError(RuntimeError):
     """Raised when validation, staging, or publication cannot complete safely."""
 
 
+class _UnsafeMediaPlatformError(RuntimeError):
+    """Raised when the runtime cannot provide no-follow openat semantics."""
+
+
 _MARKER_NAME = ".novel-to-ai-drama-pack-export.json"
 _MARKER = {
     "export_format": "novel-to-ai-drama-pack",
@@ -167,10 +171,12 @@ def _hash_media_without_following_symlinks(
 ) -> str:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     no_follow = getattr(os, "O_NOFOLLOW", 0)
-    directory_fd = os.open(project_root, directory_flags)
-    opened_directories: list[int] = [directory_fd]
+    directory_fd: int | None = None
+    opened_directories: list[int] = []
     file_fd: int | None = None
     try:
+        directory_fd = os.open(project_root, directory_flags)
+        opened_directories.append(directory_fd)
         for component in parts[:-1]:
             directory_fd = os.open(
                 component,
@@ -203,11 +209,33 @@ def _hash_media_without_following_symlinks(
         ):
             raise OSError("media file changed while hashing")
         return digest.hexdigest()
+    except (TypeError, NotImplementedError) as error:
+        raise _UnsafeMediaPlatformError(
+            "platform cannot safely verify media without following symlinks"
+        ) from error
     finally:
         if file_fd is not None:
             os.close(file_fd)
         for opened_fd in reversed(opened_directories):
             os.close(opened_fd)
+
+
+def _supports_safe_media_open() -> bool:
+    try:
+        supported_dir_fd_functions = tuple(os.supports_dir_fd)
+    except (AttributeError, TypeError):
+        return False
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    return (
+        os.open in supported_dir_fd_functions
+        and isinstance(no_follow, int)
+        and not isinstance(no_follow, bool)
+        and no_follow != 0
+        and isinstance(directory, int)
+        and not isinstance(directory, bool)
+        and directory != 0
+    )
 
 
 def _physical_media_errors(data: dict[str, Any], project_path: Path) -> list[str]:
@@ -219,6 +247,13 @@ def _physical_media_errors(data: dict[str, Any], project_path: Path) -> list[str
     assets = data.get("assets")
     if not isinstance(assets, list):
         return ["assets must be a list for physical media verification"]
+    if any(
+        isinstance(asset, dict) and asset.get("status") == "completed"
+        for asset in assets
+    ) and not _supports_safe_media_open():
+        return [
+            "platform cannot safely verify media without following symlinks"
+        ]
 
     for index, asset in enumerate(assets):
         if not isinstance(asset, dict) or asset.get("status") != "completed":
@@ -279,6 +314,9 @@ def _physical_media_errors(data: dict[str, Any], project_path: Path) -> list[str
             continue
         try:
             actual_checksum = _hash_media_without_following_symlinks(project_root, parts)
+        except _UnsafeMediaPlatformError as error:
+            errors.append(str(error))
+            break
         except OSError as error:
             errors.append(f"{label} media file cannot be safely read: {_single_line(error)}")
             continue
