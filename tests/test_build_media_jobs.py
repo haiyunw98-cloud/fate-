@@ -13,6 +13,7 @@ import pytest
 
 import build_media_jobs as media_jobs
 from build_media_jobs import MediaJobError, build_media_jobs, sort_media_jobs, write_jobs
+from workflow_guard import create_redo_asset
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,10 +46,85 @@ def _job(jobs: list[dict[str, Any]], kind: str, owner_id: str) -> dict[str, Any]
     )
 
 
+def _append_character_version(
+    project: dict[str, Any], version: int
+) -> dict[str, Any]:
+    original = next(
+        asset
+        for asset in project["assets"]
+        if asset["asset_id"] == "CHAR_C001" and asset["version"] == 1
+    )
+    asset = copy.deepcopy(original)
+    asset.update(
+        {
+            "version": version,
+            "file_name": f"CHAR_C001_V{version:03d}.png",
+            "relative_path": (
+                f"assets/characters/CHAR_C001_V{version:03d}.png"
+            ),
+            "reference_token": f"@角色_C001_林岚_综合设定图_V{version:03d}",
+            "status": "confirmed",
+        }
+    )
+    project["assets"].append(asset)
+    return asset
+
+
 def test_completed_project_needs_no_media_jobs(
     valid_project: dict[str, Any],
 ) -> None:
     assert build_media_jobs(valid_project) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("asset_type", "expression_sheet"),
+        ("owner_type", "scene"),
+        ("owner_id", "C002"),
+    ],
+)
+def test_media_jobs_reject_forged_asset_history_identity(
+    valid_project: dict[str, Any], field: str, value: str
+) -> None:
+    forged = _append_character_version(valid_project, 2)
+    forged[field] = value
+
+    with pytest.raises(
+        MediaJobError,
+        match=(
+            f"asset version history for CHAR_C001 has inconsistent {field}"
+        ),
+    ):
+        build_media_jobs(valid_project)
+
+
+def test_media_jobs_accept_legal_redo_v003_as_active_version(
+    valid_project: dict[str, Any],
+) -> None:
+    redone = create_redo_asset(valid_project, "CHAR_C001", "first retry")
+    redone = create_redo_asset(redone, "CHAR_C001", "second retry")
+    shot = redone["episodes"][0]["shots"][0]
+    for field in ("prompt_zh", "prompt_en"):
+        shot[field] = shot[field].replace(
+            "@角色_C001_林岚_综合设定图_V001",
+            "@角色_C001_林岚_综合设定图_V003",
+        )
+    redone["assets"] = [
+        asset
+        for asset in redone["assets"]
+        if asset["asset_type"] != "shot_sample"
+    ]
+
+    jobs = build_media_jobs(redone)
+
+    character_job = _job(jobs, "character_sheet", "C001")
+    shot_job = _job(jobs, "shot_sample", "E001_SH001")
+    assert (character_job["asset_id"], character_job["version"]) == (
+        "CHAR_C001",
+        3,
+    )
+    assert character_job["job_id"] in shot_job["depends_on"]
 
 
 def test_media_jobs_follow_required_stage_order_and_dependencies(

@@ -103,6 +103,7 @@ def _assets(data: dict[str, Any]) -> list[dict[str, Any]]:
         raise MediaJobError("assets must be a list")
     result: list[dict[str, Any]] = []
     identities: set[tuple[str, int]] = set()
+    identity_values_by_asset_id: dict[str, dict[str, set[str]]] = {}
     for index, asset in enumerate(raw):
         if not isinstance(asset, dict):
             raise MediaJobError(f"assets[{index}] must be an object")
@@ -118,7 +119,26 @@ def _assets(data: dict[str, Any]) -> list[dict[str, Any]]:
                 f"duplicate asset identity: {asset_id} V{version:03d}"
             )
         identities.add(identity)
+        identity_values = identity_values_by_asset_id.setdefault(
+            str(asset_id),
+            {
+                "asset_type": set(),
+                "owner_type": set(),
+                "owner_id": set(),
+            },
+        )
+        for field in ("asset_type", "owner_type", "owner_id"):
+            value = asset.get(field)
+            if _nonempty(value):
+                identity_values[field].add(str(value))
         result.append(asset)
+    for asset_id in sorted(identity_values_by_asset_id):
+        identity_values = identity_values_by_asset_id[asset_id]
+        for field in ("asset_type", "owner_type", "owner_id"):
+            if len(identity_values[field]) > 1:
+                raise MediaJobError(
+                    f"asset version history for {asset_id} has inconsistent {field}"
+                )
     return result
 
 
