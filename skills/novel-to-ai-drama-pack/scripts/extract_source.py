@@ -22,6 +22,10 @@ def _extract_plain(path: Path) -> str:
             return path.read_text(encoding=encoding)
         except UnicodeDecodeError:
             continue
+        except OSError as error:
+            raise SourceExtractionError(
+                f"plain source read failed for {path}: {error}"
+            ) from error
     raise SourceExtractionError(
         f"encoding failure for {path}: tried {', '.join(encodings)}"
     )

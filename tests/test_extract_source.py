@@ -100,6 +100,36 @@ def test_plain_text_reports_encoding_failure_without_replacement(tmp_path: Path)
     assert str(source) in str(error.value)
 
 
+def test_missing_plain_text_reports_attributed_read_failure(tmp_path: Path) -> None:
+    source = tmp_path / "missing.txt"
+
+    with pytest.raises(SourceExtractionError) as error:
+        extract_text(source)
+
+    message = str(error.value)
+    assert "plain source read failed" in message.lower()
+    assert str(source) in message
+
+
+def test_plain_text_permission_error_is_attributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "unreadable.txt"
+
+    def reject_read(path: Path, *args: object, **kwargs: object) -> str:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "read_text", reject_read)
+
+    with pytest.raises(SourceExtractionError) as error:
+        extract_text(source)
+
+    message = str(error.value)
+    assert "plain source read failed" in message.lower()
+    assert str(source) in message
+    assert "permission denied" in message.lower()
+
+
 def test_normalizes_line_endings_trailing_whitespace_and_large_gaps(
     tmp_path: Path,
 ) -> None:
@@ -264,6 +294,24 @@ def test_cli_refuses_same_input_and_output_without_changing_source(tmp_path: Pat
     assert completed.returncode != 0
     assert "same" in completed.stderr.lower()
     assert source.read_text(encoding="utf-8") == original
+
+
+def test_cli_reports_missing_plain_source_without_traceback(tmp_path: Path) -> None:
+    source = tmp_path / "missing.md"
+    output = tmp_path / "extracted.txt"
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), str(source), "--output", str(output)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "plain source read failed" in completed.stderr.lower()
+    assert str(source) in completed.stderr
+    assert "traceback" not in completed.stderr.lower()
+    assert not output.exists()
 
 
 def test_cli_writes_utf8_trailing_newline_and_prints_absolute_path(
