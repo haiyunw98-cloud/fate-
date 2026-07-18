@@ -69,8 +69,8 @@
           "scene_id": "S001",
           "prop_ids": ["P001"],
           "food_ids": ["F001"],
-          "prompt_zh": "林岚站在酒楼包厢内，桌上摆着莲花酥与青铜长剑",
-          "prompt_en": "Lin Lan stands in a tavern private room beside lotus pastries and a bronze sword",
+          "prompt_zh": "林岚@角色_C001_林岚_综合设定图_V001站在酒楼包厢@场景_S001_酒楼包厢_场景设定图_V001内，桌上摆着莲花酥@食物_F001_莲花酥_食物设定图_V001与青铜长剑@道具_P001_青铜长剑_道具设定图_V001",
+          "prompt_en": "林岚@角色_C001_林岚_综合设定图_V001 stands in 酒楼包厢@场景_S001_酒楼包厢_场景设定图_V001 beside 莲花酥@食物_F001_莲花酥_食物设定图_V001 and 青铜长剑@道具_P001_青铜长剑_道具设定图_V001",
           "negative_prompt": "模糊，畸形手指，文字水印",
           "expression_asset_id": null,
           "action_asset_id": null
@@ -89,8 +89,8 @@
           "scene_id": "S001",
           "prop_ids": [],
           "food_ids": [],
-          "prompt_zh": "林岚回望昏暗的酒楼包厢",
-          "prompt_en": "Lin Lan looks back at the dim tavern private room",
+          "prompt_zh": "林岚@角色_C001_林岚_综合设定图_V001回望昏暗的酒楼包厢@场景_S001_酒楼包厢_场景设定图_V001",
+          "prompt_en": "林岚@角色_C001_林岚_综合设定图_V001 looks back at the dim 酒楼包厢@场景_S001_酒楼包厢_场景设定图_V001",
           "negative_prompt": "模糊，文字水印",
           "expression_asset_id": null,
           "action_asset_id": null
@@ -109,8 +109,8 @@
           "scene_id": "S001",
           "prop_ids": [],
           "food_ids": [],
-          "prompt_zh": "晨光照进酒楼包厢，林岚神情坚定",
-          "prompt_en": "Morning light enters the tavern room as Lin Lan looks determined",
+          "prompt_zh": "晨光照进酒楼包厢@场景_S001_酒楼包厢_场景设定图_V001，林岚@角色_C001_林岚_综合设定图_V001神情坚定",
+          "prompt_en": "Morning light enters 酒楼包厢@场景_S001_酒楼包厢_场景设定图_V001 as 林岚@角色_C001_林岚_综合设定图_V001 looks determined",
           "negative_prompt": "模糊，文字水印",
           "expression_asset_id": null,
           "action_asset_id": null
