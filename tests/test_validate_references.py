@@ -355,6 +355,56 @@ def test_episode_ranged_version_is_active_only_within_inclusive_boundaries(
     assert validate_references(valid_project) == []
 
 
+def test_ranged_character_stage_takes_precedence_over_newer_global_stage(
+    valid_project: dict[str, Any],
+) -> None:
+    ranged = valid_project["assets"][1]
+    ranged["episode_range"] = [1, 1]
+    global_v2 = completed_asset(
+        asset_id="CHAR_C001",
+        version=2,
+        asset_type="character_sheet",
+        owner_type="character",
+        owner_id="C001",
+        token="@角色_C001_林岚_综合设定图_V002",
+    )
+    valid_project["assets"].append(global_v2)
+    valid_project["episodes"] = [valid_project["episodes"][0]]
+
+    assert validate_references(valid_project) == []
+
+    replace_in_both(
+        shot(valid_project),
+        CHAR_V1,
+        "@角色_C001_林岚_综合设定图_V002",
+    )
+
+    assert_has_error(
+        validate_references(valid_project),
+        f"C001 active reference must be {CHAR_V1}",
+    )
+
+
+def test_overlapping_ranged_character_stages_report_ambiguity(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["assets"][1]["episode_range"] = [1, 2]
+    valid_project["assets"].append(
+        completed_asset(
+            asset_id="CHAR_C001",
+            version=2,
+            asset_type="character_sheet",
+            owner_type="character",
+            owner_id="C001",
+            token="@角色_C001_林岚_综合设定图_V002",
+            episode_range=[1, 3],
+        )
+    )
+    valid_project["episodes"] = [valid_project["episodes"][0]]
+
+    assert_has_error(validate_references(valid_project), "ambiguous character_sheet")
+
+
 @pytest.mark.parametrize(
     "episode_range",
     ["2-3", [2], [3, 2], [True, 3], [2, "3"]],

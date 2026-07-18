@@ -11,6 +11,12 @@ import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable, Sequence
 
+from asset_stages import (
+    StageSelectionError,
+    active_assets_by_stage,
+    select_active_for_episode,
+    select_parent_for_child,
+)
 from project_io import atomic_write_json, load_json
 from validate_references import _scan_tokens, validate_references
 
@@ -230,13 +236,12 @@ def _required_stage_assets(
         and asset.get("status") != "discarded"
     ]
     if matching:
-        return sorted(
-            matching,
-            key=lambda asset: (
-                str(asset.get("asset_id", "")),
-                _positive_version(asset.get("version")) or 0,
-            ),
-        )
+        try:
+            return active_assets_by_stage(
+                matching, owner_id=owner_id, asset_type=kind
+            )
+        except StageSelectionError as error:
+            raise MediaJobError(str(error)) from error
     generated, _ = _resolve_asset(
         assets,
         kind=kind,
@@ -245,83 +250,6 @@ def _required_stage_assets(
         forced_asset_id=forced_asset_id,
     )
     return [generated]
-
-
-def _stage_episode_range(
-    asset: dict[str, Any], label: str
-) -> tuple[int, int] | None:
-    value = asset.get("episode_range")
-    if value is None:
-        return None
-    if not (
-        isinstance(value, list)
-        and len(value) == 2
-        and all(
-            isinstance(item, int) and not isinstance(item, bool) and item > 0
-            for item in value
-        )
-        and value[0] <= value[1]
-    ):
-        raise MediaJobError(f"{label} has invalid episode_range")
-    return value[0], value[1]
-
-
-def _resolve_stage_parent(
-    child: dict[str, Any],
-    parents: list[dict[str, Any]],
-    *,
-    parent_kind: str,
-) -> dict[str, Any]:
-    child_label = (
-        f"{child.get('asset_id')} V{_positive_version(child.get('version')) or 0:03d}"
-    )
-    candidates = [
-        parent for parent in parents if parent.get("status") != "discarded"
-    ]
-    if not candidates:
-        raise MediaJobError(f"{child_label} has no matching {parent_kind} parent")
-
-    child_range = _stage_episode_range(child, child_label)
-    parent_ranges = {
-        id(parent): _stage_episode_range(
-            parent,
-            f"{parent.get('asset_id')} "
-            f"V{_positive_version(parent.get('version')) or 0:03d}",
-        )
-        for parent in candidates
-    }
-    if child_range is not None:
-        exact = [
-            parent for parent in candidates if parent_ranges[id(parent)] == child_range
-        ]
-        if len(exact) == 1:
-            return exact[0]
-        if len(exact) > 1:
-            raise MediaJobError(f"ambiguous {parent_kind} parent for {child_label}")
-        covering = []
-        for parent in candidates:
-            parent_range = parent_ranges[id(parent)]
-            if parent_range is None or (
-                parent_range[0] <= child_range[0]
-                and parent_range[1] >= child_range[1]
-            ):
-                covering.append(parent)
-        if len(covering) == 1:
-            return covering[0]
-        if len(covering) > 1:
-            raise MediaJobError(f"ambiguous {parent_kind} parent for {child_label}")
-        raise MediaJobError(f"{child_label} has no matching {parent_kind} parent")
-
-    global_parents = [
-        parent for parent in candidates if parent_ranges[id(parent)] is None
-    ]
-    if len(global_parents) == 1:
-        return global_parents[0]
-    if len(global_parents) > 1:
-        raise MediaJobError(f"ambiguous {parent_kind} parent for {child_label}")
-    if len(candidates) == 1:
-        return candidates[0]
-    raise MediaJobError(f"ambiguous {parent_kind} parent for {child_label}")
 
 
 def _asset_output(asset: dict[str, Any], kind: str) -> dict[str, str]:
@@ -440,21 +368,6 @@ def _active_token(asset: dict[str, Any]) -> str | None:
     return str(token) if _nonempty(token) else None
 
 
-def _covers_episode(asset: dict[str, Any], episode_number: int) -> bool:
-    episode_range = asset.get("episode_range")
-    if episode_range is None:
-        return True
-    return (
-        isinstance(episode_range, list)
-        and len(episode_range) == 2
-        and all(
-            isinstance(value, int) and not isinstance(value, bool)
-            for value in episode_range
-        )
-        and episode_range[0] <= episode_number <= episode_range[1]
-    )
-
-
 def _active_asset_for_episode(
     assets: Iterable[dict[str, Any]],
     *,
@@ -463,17 +376,17 @@ def _active_asset_for_episode(
     owner_id: str | None = None,
     asset_id: str | None = None,
 ) -> dict[str, Any] | None:
-    candidates = [
-        asset
-        for asset in assets
-        if asset.get("asset_type") == kind
-        and asset.get("status") != "discarded"
-        and (owner_id is None or asset.get("owner_id") == owner_id)
-        and (asset_id is None or asset.get("asset_id") == asset_id)
-        and _positive_version(asset.get("version")) is not None
-        and _covers_episode(asset, episode_number)
-    ]
-    return max(candidates, key=lambda asset: int(asset["version"]), default=None)
+    try:
+        return select_active_for_episode(
+            assets,
+            episode_number,
+            owner_id=owner_id,
+            asset_type=kind,
+            asset_id=asset_id,
+            description=kind,
+        )
+    except StageSelectionError as error:
+        raise MediaJobError(str(error)) from error
 
 
 def _dialogue_lines(shot: dict[str, Any]) -> list[dict[str, str]]:
@@ -958,6 +871,8 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         requirement_assets[key] = required
         scheduled: list[dict[str, Any]] = []
         for asset in required:
+            if asset.get("status") == "completed":
+                continue
             if asset_context is None:
                 asset_refs = list(refs)
                 asset_dependencies = list(dependencies)
@@ -967,8 +882,6 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 asset_refs = list(context_refs)
                 asset_dependencies = list(context_dependencies)
                 asset_input = context_input
-            if asset.get("status") == "completed":
-                continue
             asset_id = asset.get("asset_id")
             version = _positive_version(asset.get("version"))
             if not _nonempty(asset_id) or version is None:
@@ -1028,9 +941,12 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         def resolve(
             child: dict[str, Any],
         ) -> tuple[list[str], list[dict[str, Any] | None], dict[str, Any]]:
-            parent = _resolve_stage_parent(
-                child, parent_assets, parent_kind=parent_kind
-            )
+            try:
+                parent = select_parent_for_child(
+                    child, parent_assets, parent_kind=parent_kind
+                )
+            except StageSelectionError as error:
+                raise MediaJobError(str(error)) from error
             token = _active_token(parent)
             if token is None:
                 raise MediaJobError(

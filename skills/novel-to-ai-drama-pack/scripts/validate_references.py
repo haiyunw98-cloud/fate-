@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from asset_stages import StageSelectionError, select_active_for_episode
 from project_io import load_json
 
 
@@ -94,7 +95,7 @@ def _build_registry(
         errors.append("assets must be a list")
         return [], set()
 
-    completed: list[dict[str, Any]] = []
+    registered: list[dict[str, Any]] = []
     tokens: set[str] = set()
     for index, asset in enumerate(raw_assets):
         path = f"assets[{index}]"
@@ -105,23 +106,15 @@ def _build_registry(
         asset_copy = dict(asset)
         asset_copy["__path"] = path
         asset_copy["__episode_range"] = episode_range
-        if asset.get("status") != "completed":
-            continue
+        registered.append(asset_copy)
         token = asset.get("reference_token")
-        if not isinstance(token, str) or not token.strip():
-            continue
-        completed.append(asset_copy)
-        tokens.add(token)
-    return completed, tokens
-
-
-def _covers_episode(asset: dict[str, Any], episode_number: int) -> bool:
-    episode_range = asset.get("__episode_range")
-    if episode_range is False:
-        return False
-    if episode_range is None:
-        return True
-    return episode_range[0] <= episode_number <= episode_range[1]
+        if (
+            asset.get("status") == "completed"
+            and isinstance(token, str)
+            and token.strip()
+        ):
+            tokens.add(token)
+    return registered, tokens
 
 
 def _active_asset(
@@ -132,22 +125,17 @@ def _active_asset(
     asset_type: str | None = None,
     asset_id: str | None = None,
 ) -> dict[str, Any] | None:
-    candidates = []
-    for asset in assets:
-        if owner_id is not None and asset.get("owner_id") != owner_id:
-            continue
-        if asset_type is not None and asset.get("asset_type") != asset_type:
-            continue
-        if asset_id is not None and asset.get("asset_id") != asset_id:
-            continue
-        version = asset.get("version")
-        if not _is_positive_integer(version):
-            continue
-        if _covers_episode(asset, episode_number):
-            candidates.append(asset)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda asset: asset["version"])
+    candidates = [
+        asset for asset in assets if asset.get("__episode_range") is not False
+    ]
+    return select_active_for_episode(
+        candidates,
+        episode_number,
+        owner_id=owner_id,
+        asset_type=asset_type,
+        asset_id=asset_id,
+        description=asset_type or asset_id or "asset",
+    )
 
 
 def _scan_tokens(prompt: str, known_tokens: set[str]) -> list[_TokenOccurrence]:
@@ -203,16 +191,26 @@ def _resolve_required_asset(
     shot_path: str,
     errors: list[str],
 ) -> dict[str, Any] | None:
-    active = _active_asset(
-        assets,
-        episode_number,
-        owner_id=owner_id,
-        asset_type=asset_type,
-    )
-    if active is None:
+    try:
+        active = _active_asset(
+            assets,
+            episode_number,
+            owner_id=owner_id,
+            asset_type=asset_type,
+        )
+    except StageSelectionError as error:
+        errors.append(f"{shot_path}: {error}")
+        return None
+    if (
+        active is None
+        or active.get("status") != "completed"
+        or not isinstance(active.get("reference_token"), str)
+        or not active["reference_token"].strip()
+    ):
         errors.append(
             f"{shot_path}: no active completed {asset_type} for {_single_line(owner_id)}"
         )
+        return None
     return active
 
 
@@ -250,8 +248,17 @@ def _selected_character_extras(
         if not isinstance(selected_id, str) or not selected_id:
             errors.append(f"{shot_path}.{field} must be null or a nonempty string")
             continue
-        active = _active_asset(assets, episode_number, asset_id=selected_id)
-        if active is None:
+        try:
+            active = _active_asset(assets, episode_number, asset_id=selected_id)
+        except StageSelectionError as error:
+            errors.append(f"{shot_path}.{field}: {error}")
+            continue
+        if (
+            active is None
+            or active.get("status") != "completed"
+            or not isinstance(active.get("reference_token"), str)
+            or not active["reference_token"].strip()
+        ):
             errors.append(
                 f"{shot_path}.{field}: no active completed asset for "
                 f"{_single_line(selected_id)}"
