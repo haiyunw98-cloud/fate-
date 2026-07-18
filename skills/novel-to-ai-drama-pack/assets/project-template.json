@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0.0",
+  "project": {
+    "project_id": "PRJ001",
+    "title": "未命名项目",
+    "status": "draft",
+    "target_episode_count": 1
+  },
+  "source": {
+    "input_type": "pasted_text",
+    "file_name": null,
+    "sha256": "uninitialized",
+    "character_count": 0,
+    "chapter_index": [],
+    "coverage": 0.0
+  },
+  "analysis": {
+    "world_bible": "未生成",
+    "timeline": [],
+    "story_arc": [],
+    "adaptation_decisions": []
+  },
+  "characters": [],
+  "scenes": [],
+  "props": [],
+  "foods": [],
+  "episodes": [],
+  "assets": [],
+  "generation_settings": {
+    "aspect_ratio": "9:16",
+    "image_provider": "built_in_image_gen",
+    "voice_provider": "openai_speech",
+    "sample_episode_count": 1,
+    "script_episode_count": 3
+  },
+  "generation_runs": []
+}
