@@ -25,21 +25,26 @@ _RESUMABLE_JOB_STATUSES = {"pending", "redo"}
 _FILE_VERSION = re.compile(r"_V(\d{3})(?=\.[^./\\]+$)")
 _TOKEN_VERSION = re.compile(r"_V(\d{3})$")
 _ANY_VERSION = re.compile(r"_V\d{3}")
-_GENERATED_OUTPUT_FIELDS = {
-    "relative_path",
-    "absolute_path",
-    "file_path",
-    "output_path",
-    "output_url",
-    "checksum",
-    "completed_at",
-    "generated_at",
-    "output",
-    "provider_output",
-    "provider_response",
-    "generation_output",
-    "media_url",
-    "size_bytes",
+_STABLE_ASSET_FIELDS = {
+    "asset_id",
+    "asset_type",
+    "owner_type",
+    "owner_id",
+    "prompt",
+    "negative_prompt",
+    "parent_asset_ids",
+    "episode_range",
+    "stage",
+    "stage_id",
+    "stage_name",
+    "stage_metadata",
+    "ai_generated",
+    "ai_disclosure",
+    "content_fingerprint",
+    "speaker_id",
+    "text",
+    "line_number",
+    "language",
 }
 
 
@@ -121,6 +126,11 @@ def _validated_history(
         raise WorkflowGuardError(f"asset_id not found: {asset_id}")
 
     versions: set[int] = set()
+    historical_values: dict[str, set[str]] = {
+        "file_name": set(),
+        "reference_token": set(),
+    }
+    redo_lineage_versions: list[int] = []
     identity_fields = ("asset_type", "owner_type", "owner_id")
     expected_identity = {field: matching[0].get(field) for field in identity_fields}
     for asset in matching:
@@ -135,6 +145,30 @@ def _validated_history(
                 f"asset version history for {asset_id} has duplicate version {version}"
             )
         versions.add(version)
+        for field, pattern in (
+            ("file_name", _FILE_VERSION),
+            ("reference_token", _TOKEN_VERSION),
+        ):
+            value = asset.get(field)
+            if not isinstance(value, str):
+                raise WorkflowGuardError(
+                    f"asset version history for {asset_id} has malformed {field}"
+                )
+            if value in historical_values[field]:
+                raise WorkflowGuardError(
+                    f"asset version history for {asset_id} has duplicate {field}"
+                )
+            historical_values[field].add(value)
+            matches = list(pattern.finditer(value))
+            if (
+                len(matches) != 1
+                or len(_ANY_VERSION.findall(value)) != 1
+                or int(matches[0].group(1)) != version
+            ):
+                raise WorkflowGuardError(
+                    f"asset version history for {asset_id} {field} version "
+                    f"does not match V{version:03d}"
+                )
         for field in identity_fields:
             value = asset.get(field)
             if not _nonempty(value):
@@ -150,11 +184,36 @@ def _validated_history(
             raise WorkflowGuardError(
                 f"asset version history for {asset_id} has unknown status: {status}"
             )
+        parent_ids = asset.get("parent_asset_ids")
+        if not isinstance(parent_ids, list) or any(
+            not _nonempty(parent_id) for parent_id in parent_ids
+        ):
+            raise WorkflowGuardError(
+                f"asset version history for {asset_id} has malformed parent_asset_ids"
+            )
+        if "redo_parent" in asset:
+            redo_parent = asset.get("redo_parent")
+            if (
+                not isinstance(redo_parent, dict)
+                or set(redo_parent) != {"asset_id", "version"}
+                or redo_parent.get("asset_id") != asset_id
+                or not _positive_integer(redo_parent.get("version"))
+                or redo_parent.get("version") != version - 1
+                or version == 1
+            ):
+                raise WorkflowGuardError(
+                    f"asset version history for {asset_id} has invalid redo_parent"
+                )
+            redo_lineage_versions.append(int(redo_parent["version"]))
 
     maximum = max(versions)
     if versions != set(range(1, maximum + 1)):
         raise WorkflowGuardError(
             f"asset version history for {asset_id} must start at 1 and be contiguous"
+        )
+    if any(parent_version not in versions for parent_version in redo_lineage_versions):
+        raise WorkflowGuardError(
+            f"asset version history for {asset_id} redo_parent version is missing"
         )
     return sorted(matching, key=lambda item: int(item["version"]))
 
@@ -223,7 +282,11 @@ def create_redo_asset(
     if next_version > 999:
         raise WorkflowGuardError("asset version exceeds V999 naming contract")
 
-    new_asset = copy.deepcopy(latest)
+    new_asset = {
+        field: copy.deepcopy(latest[field])
+        for field in _STABLE_ASSET_FIELDS
+        if field in latest
+    }
     new_asset["version"] = next_version
     new_asset["file_name"] = _versioned_value(
         latest.get("file_name"),
@@ -237,10 +300,11 @@ def create_redo_asset(
         current_version=current_version,
         next_version=next_version,
     )
-    for field in _GENERATED_OUTPUT_FIELDS:
-        new_asset.pop(field, None)
-    new_asset["parent_asset_ids"] = [asset_id]
     new_asset["status"] = "redo"
+    new_asset["redo_parent"] = {
+        "asset_id": asset_id,
+        "version": current_version,
+    }
 
     updated = copy.deepcopy(data)
     updated["assets"].append(new_asset)

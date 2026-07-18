@@ -28,6 +28,24 @@ def assert_has_error(errors: list[str], expected: str) -> None:
     assert any(expected in error for error in errors), errors
 
 
+def append_redo_asset(
+    data: dict[str, Any], asset_index: int = 1
+) -> dict[str, Any]:
+    original = data["assets"][asset_index]
+    redo = copy.deepcopy(original)
+    redo["version"] = 2
+    redo["file_name"] = original["file_name"].replace("_V001", "_V002")
+    redo["reference_token"] = original["reference_token"].replace(
+        "_V001", "_V002"
+    )
+    redo["status"] = "redo"
+    redo.pop("relative_path", None)
+    redo.pop("checksum", None)
+    redo["redo_parent"] = {"asset_id": original["asset_id"], "version": 1}
+    data["assets"].append(redo)
+    return redo
+
+
 def test_valid_project_has_no_errors(valid_project: dict[str, Any]) -> None:
     assert validate_project(valid_project) == []
 
@@ -153,6 +171,84 @@ def test_asset_version_history_must_not_have_gaps(
     assert_has_error(
         validate_project(valid_project),
         "asset version history for STYLE_PRJ001 must start at 1 and be contiguous",
+    )
+
+
+def test_valid_redo_parent_points_to_direct_previous_version(
+    valid_project: dict[str, Any],
+) -> None:
+    append_redo_asset(valid_project)
+
+    assert validate_project(valid_project) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, "assets[9].redo_parent must be an object"),
+        ([], "assets[9].redo_parent must be an object"),
+        ({"asset_id": "CHAR_C001"}, "redo_parent.version must be a positive integer"),
+        ({"version": 1}, "redo_parent.asset_id must be a nonempty string"),
+        (
+            {"asset_id": "CHAR_C001", "version": 1, "extra": True},
+            "redo_parent has unexpected keys",
+        ),
+        (
+            {
+                "asset_id": "CHAR_C001",
+                "version": 1,
+                "extra": True,
+                7: True,
+            },
+            "redo_parent has unexpected keys",
+        ),
+        (
+            {"asset_id": "EXPR_C001", "version": 1},
+            "redo_parent.asset_id must equal asset_id CHAR_C001",
+        ),
+        (
+            {"asset_id": "CHAR_C001", "version": True},
+            "redo_parent.version must be a positive integer",
+        ),
+        (
+            {"asset_id": "CHAR_C001", "version": 2},
+            "redo_parent.version must equal current version minus one",
+        ),
+    ],
+)
+def test_redo_parent_is_strictly_validated(
+    valid_project: dict[str, Any], value: object, expected: str
+) -> None:
+    redo = append_redo_asset(valid_project)
+    redo["redo_parent"] = value
+
+    assert_has_error(validate_project(valid_project), expected)
+
+
+def test_version_one_must_not_have_redo_parent(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["assets"][1]["redo_parent"] = {
+        "asset_id": "CHAR_C001",
+        "version": 1,
+    }
+
+    assert_has_error(
+        validate_project(valid_project),
+        "assets[1] version 1 must not have redo_parent",
+    )
+
+
+def test_redo_parent_version_must_actually_exist(
+    valid_project: dict[str, Any],
+) -> None:
+    redo = append_redo_asset(valid_project)
+    valid_project["assets"].remove(valid_project["assets"][1])
+
+    assert redo["redo_parent"] == {"asset_id": "CHAR_C001", "version": 1}
+    assert_has_error(
+        validate_project(valid_project),
+        "redo_parent references missing asset version: CHAR_C001 V001",
     )
 
 

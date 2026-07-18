@@ -142,6 +142,7 @@ def test_redo_v001_to_v002_preserves_metadata_and_clears_output(
     original = _asset(valid_project, "CHAR_C001")
     original.update(
         {
+            "parent_asset_ids": ["STYLE_PRJ001"],
             "absolute_path": "/tmp/CHAR_C001_V001.png",
             "file_path": "/tmp/CHAR_C001_V001.png",
             "output_path": "/tmp/CHAR_C001_V001.png",
@@ -152,6 +153,17 @@ def test_redo_v001_to_v002_preserves_metadata_and_clears_output(
             "stage_metadata": {"costume": "blue"},
             "completed_at": "2026-07-18T08:00:00Z",
             "provider_output": {"request_id": "old"},
+            "provider_job_id": "job-old",
+            "failure_reason": "old failure",
+            "width": 1024,
+            "height": 1536,
+            "duration_seconds": 3.5,
+            "negative_prompt": "bad hands",
+            "content_fingerprint": "a" * 64,
+            "speaker_id": "C001",
+            "text": "stable dialogue identity",
+            "stage": "opening",
+            "unknown_provider_blob": {"must": "drop"},
         }
     )
     before = copy.deepcopy(valid_project)
@@ -173,7 +185,13 @@ def test_redo_v001_to_v002_preserves_metadata_and_clears_output(
     assert redo["stage_metadata"] == {"costume": "blue"}
     assert redo["prompt"] == original["prompt"]
     assert redo["status"] == "redo"
-    assert redo["parent_asset_ids"] == ["CHAR_C001"]
+    assert redo["parent_asset_ids"] == ["STYLE_PRJ001"]
+    assert redo["redo_parent"] == {"asset_id": "CHAR_C001", "version": 1}
+    assert redo["negative_prompt"] == "bad hands"
+    assert redo["content_fingerprint"] == "a" * 64
+    assert redo["speaker_id"] == "C001"
+    assert redo["text"] == "stable dialogue identity"
+    assert redo["stage"] == "opening"
     assert redo["file_name"] == "CHAR_C001_V002.png"
     assert redo["reference_token"] == "@角色_C001_林岚_综合设定图_V002"
     for field in (
@@ -185,6 +203,12 @@ def test_redo_v001_to_v002_preserves_metadata_and_clears_output(
         "checksum",
         "completed_at",
         "provider_output",
+        "provider_job_id",
+        "failure_reason",
+        "width",
+        "height",
+        "duration_seconds",
+        "unknown_provider_blob",
     ):
         assert field not in redo
 
@@ -233,6 +257,14 @@ def test_redo_appends_unique_run_with_exact_reason_and_old_prompt(
     )["prompt"]
     assert first_run["status"] == "pending"
     assert isinstance(first_run["created_at"], str) and first_run["created_at"]
+    assert _asset(second, "CHAR_C001", 2)["redo_parent"] == {
+        "asset_id": "CHAR_C001",
+        "version": 1,
+    }
+    assert _asset(second, "CHAR_C001", 3)["redo_parent"] == {
+        "asset_id": "CHAR_C001",
+        "version": 2,
+    }
 
 
 @pytest.mark.parametrize("reason", ["", "   ", None, 3])
@@ -352,7 +384,66 @@ def test_redo_rejects_names_that_cannot_be_safely_versioned(
 ) -> None:
     _asset(valid_project, "CHAR_C001")[field] = "unsafe-name"
 
-    with pytest.raises(WorkflowGuardError, match=f"cannot safely update {field}"):
+    with pytest.raises(WorkflowGuardError, match=field):
+        create_redo_asset(valid_project, "CHAR_C001", "retry")
+
+
+@pytest.mark.parametrize("field", ["file_name", "reference_token"])
+def test_redo_rejects_version_mismatch_in_older_history(
+    valid_project: dict[str, Any], field: str
+) -> None:
+    original = _asset(valid_project, "CHAR_C001")
+    second = copy.deepcopy(original)
+    second.update(
+        {
+            "version": 2,
+            "file_name": "CHAR_C001_V002.png",
+            "reference_token": "@角色_C001_林岚_综合设定图_V002",
+        }
+    )
+    original[field] = _replace_version(original[field], 1, 999)
+    valid_project["assets"].append(second)
+
+    with pytest.raises(WorkflowGuardError, match=f"history.*{field}.*version"):
+        create_redo_asset(valid_project, "CHAR_C001", "retry")
+
+
+@pytest.mark.parametrize("field", ["file_name", "reference_token"])
+def test_redo_rejects_duplicate_historical_names(
+    valid_project: dict[str, Any], field: str
+) -> None:
+    original = _asset(valid_project, "CHAR_C001")
+    second = copy.deepcopy(original)
+    second.update(
+        {
+            "version": 2,
+            "file_name": "CHAR_C001_V002.png",
+            "reference_token": "@角色_C001_林岚_综合设定图_V002",
+        }
+    )
+    second[field] = original[field]
+    valid_project["assets"].append(second)
+
+    with pytest.raises(WorkflowGuardError, match=f"history.*{field}"):
+        create_redo_asset(valid_project, "CHAR_C001", "retry")
+
+
+def test_redo_rejects_malformed_existing_redo_lineage(
+    valid_project: dict[str, Any],
+) -> None:
+    original = _asset(valid_project, "CHAR_C001")
+    second = copy.deepcopy(original)
+    second.update(
+        {
+            "version": 2,
+            "file_name": "CHAR_C001_V002.png",
+            "reference_token": "@角色_C001_林岚_综合设定图_V002",
+            "redo_parent": {"asset_id": "CHAR_C001", "version": 2},
+        }
+    )
+    valid_project["assets"].append(second)
+
+    with pytest.raises(WorkflowGuardError, match="redo_parent"):
         create_redo_asset(valid_project, "CHAR_C001", "retry")
 
 

@@ -398,6 +398,7 @@ def _validate_assets(
     asset_keys: set[tuple[str, int]] = set()
     versions_by_asset_id: dict[str, set[int]] = {}
     tokens: set[str] = set()
+    redo_parents: list[tuple[str, str, int]] = []
 
     for index, raw_asset in enumerate(raw_assets):
         path = f"assets[{index}]"
@@ -485,6 +486,55 @@ def _validate_assets(
             asset.get("parent_asset_ids"), f"{path}.parent_asset_ids", errors
         )
 
+        if "redo_parent" in asset:
+            redo_parent = _require_object(
+                asset.get("redo_parent"), f"{path}.redo_parent", errors
+            )
+            if valid_version and version == 1:
+                errors.append(f"{path} version 1 must not have redo_parent")
+            if redo_parent is not None:
+                unexpected_redo_keys = sorted(
+                    set(redo_parent) - {"asset_id", "version"},
+                    key=lambda key: (type(key).__name__, repr(key)),
+                )
+                if unexpected_redo_keys:
+                    errors.append(
+                        f"{path}.redo_parent has unexpected keys: "
+                        + ", ".join(
+                            key if isinstance(key, str) else repr(key)
+                            for key in unexpected_redo_keys
+                        )
+                    )
+                redo_asset_id = redo_parent.get("asset_id")
+                valid_redo_asset_id = _is_nonempty_string(redo_asset_id)
+                if not valid_redo_asset_id:
+                    errors.append(
+                        f"{path}.redo_parent.asset_id must be a nonempty string"
+                    )
+                elif asset_id is not None and redo_asset_id != asset_id:
+                    errors.append(
+                        f"{path}.redo_parent.asset_id must equal asset_id {asset_id}"
+                    )
+                redo_version = redo_parent.get("version")
+                valid_redo_version = _is_integer(redo_version) and redo_version > 0
+                if not valid_redo_version:
+                    errors.append(
+                        f"{path}.redo_parent.version must be a positive integer"
+                    )
+                elif valid_version and redo_version != version - 1:
+                    errors.append(
+                        f"{path}.redo_parent.version must equal current version minus one"
+                    )
+                if (
+                    valid_redo_asset_id
+                    and valid_redo_version
+                    and asset_id is not None
+                    and redo_asset_id == asset_id
+                    and valid_version
+                    and redo_version == version - 1
+                ):
+                    redo_parents.append((path, redo_asset_id, redo_version))
+
         status = asset.get("status")
         if not isinstance(status, str) or status not in _ASSET_STATUSES:
             errors.append(f"{path}.status is not allowed: {status}")
@@ -518,6 +568,13 @@ def _validate_assets(
         if versions != set(range(1, max(versions) + 1)):
             errors.append(
                 f"asset version history for {asset_id} must start at 1 and be contiguous"
+            )
+
+    for path, redo_asset_id, redo_version in redo_parents:
+        if (redo_asset_id, redo_version) not in asset_keys:
+            errors.append(
+                f"{path}.redo_parent references missing asset version: "
+                f"{redo_asset_id} V{redo_version:03d}"
             )
 
     for index, asset in enumerate(assets):
