@@ -65,7 +65,7 @@ def active_assets_by_stage(
         previous = selected.get(key)
         if previous is None or version > int(previous["version"]):
             selected[key] = asset
-    return sorted(
+    active = sorted(
         selected.values(),
         key=lambda item: (
             str(item.get("asset_id", "")),
@@ -74,6 +74,27 @@ def active_assets_by_stage(
             int(item["version"]),
         ),
     )
+    ranged_by_scope: dict[
+        tuple[object, object], list[tuple[tuple[int, int], dict[str, Any]]]
+    ] = {}
+    for asset in active:
+        stage = normalized_stage_key(asset, _asset_label(asset))
+        if stage is not None:
+            scope = (asset.get("owner_id"), asset.get("asset_type"))
+            ranged_by_scope.setdefault(scope, []).append((stage, asset))
+    for ranged_assets in ranged_by_scope.values():
+        for index, (left_stage, left_asset) in enumerate(ranged_assets):
+            for right_stage, _ in ranged_assets[index + 1 :]:
+                if (
+                    left_stage[0] <= right_stage[1]
+                    and right_stage[0] <= left_stage[1]
+                ):
+                    kind = left_asset.get("asset_type") or "asset"
+                    raise StageSelectionError(
+                        f"ambiguous {kind} ranged stages overlap: "
+                        f"{list(left_stage)} and {list(right_stage)}"
+                    )
+    return active
 
 
 def _unique_candidate(

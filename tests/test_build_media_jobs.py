@@ -587,6 +587,151 @@ def test_overlapping_ranged_character_stages_are_rejected(
         build_media_jobs(valid_project)
 
 
+def test_future_overlapping_character_stages_are_rejected_before_episode_use(
+    valid_project: dict[str, Any],
+) -> None:
+    character_global = next(
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] == "character_sheet"
+    )
+    character_v2 = copy.deepcopy(character_global)
+    character_v2.update(
+        {
+            "version": 2,
+            "reference_token": "@角色_C001_林岚_综合设定图_V002",
+            "file_name": "CHAR_C001_V002.png",
+            "relative_path": "assets/characters/CHAR_C001_V002.png",
+            "episode_range": [2, 3],
+        }
+    )
+    character_v3 = copy.deepcopy(character_global)
+    character_v3.update(
+        {
+            "version": 3,
+            "reference_token": "@角色_C001_林岚_综合设定图_V003",
+            "file_name": "CHAR_C001_V003.png",
+            "relative_path": "assets/characters/CHAR_C001_V003.png",
+            "episode_range": [3, 4],
+        }
+    )
+    valid_project["assets"].extend([character_v2, character_v3])
+
+    with pytest.raises(
+        MediaJobError, match="ambiguous.*character_sheet.*overlap"
+    ):
+        build_media_jobs(valid_project)
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "asset_id", "token"),
+    [
+        (
+            "expression_sheet",
+            "expression_asset_id",
+            "EXPR_C001",
+            "@角色_C001_林岚_表情设定图_V001",
+        ),
+        (
+            "action_sheet",
+            "action_asset_id",
+            "ACTION_C001",
+            "@角色_C001_林岚_动作设定图_V001",
+        ),
+    ],
+)
+def test_global_character_extra_cannot_bind_to_ranged_episode_character(
+    valid_project: dict[str, Any],
+    kind: str,
+    field: str,
+    asset_id: str,
+    token: str,
+) -> None:
+    character_ranged = next(
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] == "character_sheet"
+    )
+    character_ranged["episode_range"] = [1, 1]
+    character_global = copy.deepcopy(character_ranged)
+    character_global.pop("episode_range")
+    character_global.update(
+        {
+            "version": 2,
+            "reference_token": "@角色_C001_林岚_综合设定图_V002",
+            "file_name": "CHAR_C001_V002.png",
+            "relative_path": "assets/characters/CHAR_C001_V002.png",
+        }
+    )
+    valid_project["assets"].append(character_global)
+    current_shot = valid_project["episodes"][0]["shots"][0]
+    current_shot[field] = asset_id
+    for prompt_field in ("prompt_zh", "prompt_en"):
+        current_shot[prompt_field] = current_shot[prompt_field].replace(
+            "@角色_C001_林岚_综合设定图_V001",
+            "@角色_C001_林岚_综合设定图_V001" + token,
+        )
+
+    with pytest.raises(MediaJobError, match=f"{kind}.*parent.*active character"):
+        build_media_jobs(valid_project)
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "asset_id", "token"),
+    [
+        (
+            "expression_sheet",
+            "expression_asset_id",
+            "EXPR_C001",
+            "@角色_C001_林岚_表情设定图_V001",
+        ),
+        (
+            "action_sheet",
+            "action_asset_id",
+            "ACTION_C001",
+            "@角色_C001_林岚_动作设定图_V001",
+        ),
+    ],
+)
+def test_ranged_character_extra_can_bind_to_same_ranged_character(
+    valid_project: dict[str, Any],
+    kind: str,
+    field: str,
+    asset_id: str,
+    token: str,
+) -> None:
+    character_ranged = next(
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] == "character_sheet"
+    )
+    character_ranged["episode_range"] = [1, 1]
+    character_global = copy.deepcopy(character_ranged)
+    character_global.pop("episode_range")
+    character_global.update(
+        {
+            "version": 2,
+            "reference_token": "@角色_C001_林岚_综合设定图_V002",
+            "file_name": "CHAR_C001_V002.png",
+            "relative_path": "assets/characters/CHAR_C001_V002.png",
+        }
+    )
+    extra = next(
+        asset for asset in valid_project["assets"] if asset["asset_type"] == kind
+    )
+    extra["episode_range"] = [1, 1]
+    valid_project["assets"].append(character_global)
+    current_shot = valid_project["episodes"][0]["shots"][0]
+    current_shot[field] = asset_id
+    for prompt_field in ("prompt_zh", "prompt_en"):
+        current_shot[prompt_field] = current_shot[prompt_field].replace(
+            "@角色_C001_林岚_综合设定图_V001",
+            "@角色_C001_林岚_综合设定图_V001" + token,
+        )
+
+    assert build_media_jobs(valid_project) == []
+
+
 def test_distinct_incomplete_voice_stages_keep_distinct_jobs(
     valid_project: dict[str, Any],
 ) -> None:

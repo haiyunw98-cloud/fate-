@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from asset_stages import StageSelectionError, select_active_for_episode
+from asset_stages import (
+    StageSelectionError,
+    select_active_for_episode,
+    select_parent_for_child,
+)
 from project_io import load_json
 
 
@@ -135,6 +139,14 @@ def _active_asset(
         asset_type=asset_type,
         asset_id=asset_id,
         description=asset_type or asset_id or "asset",
+    )
+
+
+def _asset_identity(asset: dict[str, Any]) -> tuple[str, int]:
+    version = asset.get("version")
+    return (
+        str(asset.get("asset_id")),
+        int(version) if _is_positive_integer(version) else 0,
     )
 
 
@@ -269,8 +281,47 @@ def _selected_character_extras(
             continue
         owner_id = active.get("owner_id")
         token = active.get("reference_token")
-        if isinstance(owner_id, str) and isinstance(token, str):
+        if not isinstance(owner_id, str) or not isinstance(token, str):
+            continue
+        listed_character_ids = shot.get("character_ids")
+        if (
+            not isinstance(listed_character_ids, list)
+            or owner_id not in listed_character_ids
+        ):
             selected.setdefault(owner_id, []).append(token)
+            continue
+        character_candidates = [
+            candidate
+            for candidate in assets
+            if candidate.get("owner_id") == owner_id
+            and candidate.get("asset_type") == "character_sheet"
+            and candidate.get("__episode_range") is not False
+        ]
+        try:
+            parent = select_parent_for_child(
+                active,
+                character_candidates,
+                parent_kind="character_sheet",
+            )
+            episode_character = _active_asset(
+                assets,
+                episode_number,
+                owner_id=owner_id,
+                asset_type="character_sheet",
+            )
+        except StageSelectionError as error:
+            errors.append(f"{shot_path}.{field}: {error}")
+            continue
+        if (
+            episode_character is None
+            or _asset_identity(parent) != _asset_identity(episode_character)
+        ):
+            errors.append(
+                f"{shot_path}.{field}: {expected_type} parent does not match "
+                f"active character for {_single_line(owner_id)}"
+            )
+            continue
+        selected.setdefault(owner_id, []).append(token)
     return selected
 
 

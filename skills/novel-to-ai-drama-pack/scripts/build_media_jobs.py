@@ -368,6 +368,11 @@ def _active_token(asset: dict[str, Any]) -> str | None:
     return str(token) if _nonempty(token) else None
 
 
+def _asset_identity(asset: dict[str, Any]) -> tuple[str, int]:
+    version = _positive_version(asset.get("version")) or 0
+    return str(asset.get("asset_id")), version
+
+
 def _active_asset_for_episode(
     assets: Iterable[dict[str, Any]],
     *,
@@ -1169,16 +1174,20 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 if dependency is not None:
                     shot_dependencies.append(dependency)
 
+            episode_characters: dict[str, dict[str, Any]] = {}
             for character_id in shot.get("character_ids", []):
-                add_shot_reference(
-                    _active_asset_for_episode(
-                        available_assets,
-                        kind="character_sheet",
-                        owner_id=str(character_id),
-                        episode_number=episode_number,
-                    ),
-                    f"character_sheet for {character_id}",
+                character_id = str(character_id)
+                character_asset = _active_asset_for_episode(
+                    available_assets,
+                    kind="character_sheet",
+                    owner_id=character_id,
+                    episode_number=episode_number,
                 )
+                add_shot_reference(
+                    character_asset, f"character_sheet for {character_id}"
+                )
+                if character_asset is not None:
+                    episode_characters[character_id] = character_asset
             scene_id = str(shot.get("scene_id", ""))
             add_shot_reference(
                 _active_asset_for_episode(
@@ -1220,13 +1229,41 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 selected_id = shot.get(field)
                 if not _nonempty(selected_id):
                     continue
+                extra_asset = _active_asset_for_episode(
+                    available_assets,
+                    kind=kind,
+                    asset_id=str(selected_id),
+                    episode_number=episode_number,
+                )
+                if extra_asset is None:
+                    add_shot_reference(None, f"{kind} {selected_id}")
+                    continue
+                owner_id = str(extra_asset.get("owner_id"))
+                character_candidates = [
+                    candidate
+                    for candidate in available_assets
+                    if candidate.get("asset_type") == "character_sheet"
+                    and candidate.get("owner_id") == owner_id
+                ]
+                try:
+                    parent = select_parent_for_child(
+                        extra_asset,
+                        character_candidates,
+                        parent_kind="character_sheet",
+                    )
+                except StageSelectionError as error:
+                    raise MediaJobError(str(error)) from error
+                episode_character = episode_characters.get(owner_id)
+                if (
+                    episode_character is None
+                    or _asset_identity(parent) != _asset_identity(episode_character)
+                ):
+                    raise MediaJobError(
+                        f"{kind} parent does not match active character for "
+                        f"{owner_id}"
+                    )
                 add_shot_reference(
-                    _active_asset_for_episode(
-                        available_assets,
-                        kind=kind,
-                        asset_id=str(selected_id),
-                        episode_number=episode_number,
-                    ),
+                    extra_asset,
                     f"{kind} {selected_id}",
                 )
 

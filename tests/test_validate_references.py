@@ -406,6 +406,81 @@ def test_overlapping_ranged_character_stages_report_ambiguity(
 
 
 @pytest.mark.parametrize(
+    ("asset_type", "field", "asset_id", "token"),
+    [
+        ("expression_sheet", "expression_asset_id", "EXPR_C001", EXPR_V1),
+        ("action_sheet", "action_asset_id", "ACTION_C001", ACTION_V1),
+    ],
+)
+def test_global_character_extra_parent_must_match_ranged_episode_character(
+    valid_project: dict[str, Any],
+    asset_type: str,
+    field: str,
+    asset_id: str,
+    token: str,
+) -> None:
+    ranged = valid_project["assets"][1]
+    ranged["episode_range"] = [1, 1]
+    valid_project["assets"].append(
+        completed_asset(
+            asset_id="CHAR_C001",
+            version=2,
+            asset_type="character_sheet",
+            owner_type="character",
+            owner_id="C001",
+            token="@角色_C001_林岚_综合设定图_V002",
+        )
+    )
+    current = shot(valid_project)
+    current[field] = asset_id
+    replace_in_both(current, CHAR_V1, CHAR_V1 + token)
+    valid_project["episodes"] = [valid_project["episodes"][0]]
+
+    assert_has_error(
+        validate_references(valid_project),
+        f"{asset_type} parent does not match active character",
+    )
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "field", "asset_id", "token"),
+    [
+        ("expression_sheet", "expression_asset_id", "EXPR_C001", EXPR_V1),
+        ("action_sheet", "action_asset_id", "ACTION_C001", ACTION_V1),
+    ],
+)
+def test_ranged_character_extra_parent_may_match_ranged_episode_character(
+    valid_project: dict[str, Any],
+    asset_type: str,
+    field: str,
+    asset_id: str,
+    token: str,
+) -> None:
+    ranged = valid_project["assets"][1]
+    ranged["episode_range"] = [1, 1]
+    valid_project["assets"].append(
+        completed_asset(
+            asset_id="CHAR_C001",
+            version=2,
+            asset_type="character_sheet",
+            owner_type="character",
+            owner_id="C001",
+            token="@角色_C001_林岚_综合设定图_V002",
+        )
+    )
+    extra = next(
+        asset for asset in valid_project["assets"] if asset["asset_type"] == asset_type
+    )
+    extra["episode_range"] = [1, 1]
+    current = shot(valid_project)
+    current[field] = asset_id
+    replace_in_both(current, CHAR_V1, CHAR_V1 + token)
+    valid_project["episodes"] = [valid_project["episodes"][0]]
+
+    assert validate_references(valid_project) == []
+
+
+@pytest.mark.parametrize(
     "episode_range",
     ["2-3", [2], [3, 2], [True, 3], [2, "3"]],
 )
