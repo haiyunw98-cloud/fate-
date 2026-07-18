@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any
 
 
-_UNSUPPORTED_DIRECTORY_SYNC_ERRNOS = {errno.EACCES, errno.EINVAL, errno.ENOTSUP, errno.EPERM}
-if hasattr(errno, "EOPNOTSUPP"):
-    _UNSUPPORTED_DIRECTORY_SYNC_ERRNOS.add(errno.EOPNOTSUPP)
+_UNSUPPORTED_DIRECTORY_SYNC_ERRNOS = {
+    error_number
+    for name in ("EINVAL", "ENOTSUP", "EOPNOTSUPP")
+    if (error_number := getattr(errno, name, None)) is not None
+}
 
 
 def sha256_file(path: Path) -> str:

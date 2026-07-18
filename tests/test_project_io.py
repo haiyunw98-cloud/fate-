@@ -61,6 +61,17 @@ def test_atomic_write_json_preserves_original_and_removes_temp_file_on_interrupt
     assert load_json(path) == original
 
 
+def test_atomic_write_json_removes_temp_file_when_json_serialization_fails(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "project.json"
+
+    with pytest.raises(TypeError):
+        atomic_write_json(path, {"invalid": {1, 2}})
+
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 @pytest.mark.skipif(project_io.os.name != "posix", reason="directory fsync is POSIX-specific")
 def test_atomic_write_json_fsyncs_parent_directory_after_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -84,6 +95,28 @@ def test_atomic_write_json_fsyncs_parent_directory_after_replacement(
 
     assert events.index("replace") < len(events) - 1
     assert events[-1] == "fsync"
+
+
+@pytest.mark.skipif(project_io.os.name != "posix", reason="directory fsync is POSIX-specific")
+def test_atomic_write_json_propagates_directory_fsync_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fsync_calls = 0
+    original_fsync = project_io.os.fsync
+
+    def reject_directory_fsync(file_descriptor: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            raise PermissionError(project_io.errno.EPERM, "permission denied")
+        original_fsync(file_descriptor)
+
+    monkeypatch.setattr(project_io.os, "fsync", reject_directory_fsync)
+
+    with pytest.raises(PermissionError):
+        atomic_write_json(tmp_path / "project.json", {"title": "已保存"})
+
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_project_template_has_canonical_shape() -> None:
