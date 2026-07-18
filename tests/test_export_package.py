@@ -605,6 +605,52 @@ def test_publish_failure_restores_existing_managed_export(
 
     assert _export_bytes(first) == before
     assert not list(tmp_path.glob(".export.backup-*"))
+    assert not list(tmp_path.glob(".export.previous-*"))
+    assert not list(tmp_path.glob(".export.staging-*"))
+
+
+def test_fsync_failure_preserves_failed_directory_and_restores_previous(
+    project_path: Path,
+    tmp_path: Path,
+    valid_project: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "export"
+    export_package(project_path, destination)
+    before = {
+        path.name: path.read_bytes()
+        for path in destination.iterdir()
+        if path.is_file()
+    }
+    valid_project["analysis"]["world_bible"] = "未完成新版"
+    _write_formal_project(project_path, valid_project)
+    real_sync = exporter._fsync_directory
+    failed_once = False
+
+    def injecting_failed_sync(path: Path) -> None:
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            (destination / "user-during-fsync.txt").write_text(
+                "keep", encoding="utf-8"
+            )
+            raise OSError("fsync interrupted")
+        real_sync(path)
+
+    monkeypatch.setattr(exporter, "_fsync_directory", injecting_failed_sync)
+
+    with pytest.raises(ExportError, match="failed export preserved"):
+        export_package(project_path, destination)
+
+    assert {
+        path.name: path.read_bytes()
+        for path in destination.iterdir()
+        if path.is_file()
+    } == before
+    failed = list(tmp_path.glob(".export.failed-*"))
+    assert len(failed) == 1
+    assert (failed[0] / "user-during-fsync.txt").read_text(encoding="utf-8") == "keep"
+    assert not list(tmp_path.glob(".export.previous-*"))
     assert not list(tmp_path.glob(".export.staging-*"))
 
 
@@ -613,6 +659,11 @@ def test_managed_export_is_replaced_at_same_destination(
 ) -> None:
     destination = tmp_path / "export"
     first = export_package(project_path, destination)
+    before = {
+        path.name: path.read_bytes()
+        for path in destination.iterdir()
+        if path.is_file()
+    }
     valid_project["analysis"]["world_bible"] = "新世界观"
     project_path.write_text(
         json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
@@ -623,6 +674,13 @@ def test_managed_export_is_replaced_at_same_destination(
     assert all(path.parent == destination for path in second.values())
     assert "新世界观" in second["project_md"].read_text(encoding="utf-8")
     assert first["project_md"] == second["project_md"]
+    previous = list(tmp_path.glob(".export.previous-*"))
+    assert len(previous) == 1
+    assert {
+        path.name: path.read_bytes()
+        for path in previous[0].iterdir()
+        if path.is_file()
+    } == before
 
 
 def test_managed_marker_binds_project_and_exact_file_whitelist(
@@ -633,12 +691,17 @@ def test_managed_marker_binds_project_and_exact_file_whitelist(
         (outputs["project_md"].parent / MARKER_NAME).read_text(encoding="utf-8")
     )
 
-    assert marker == {
-        "export_format": "novel-to-ai-drama-pack",
-        "format_version": 1,
-        "managed_files": EXPECTED_MANAGED_FILES,
-        "project_id": "PRJ001",
-    }
+    assert marker["export_format"] == "novel-to-ai-drama-pack"
+    assert marker["format_version"] == 1
+    assert marker["project_id"] == "PRJ001"
+    assert list(marker["managed_files"]) == EXPECTED_MANAGED_FILES
+    export_dir = outputs["project_md"].parent
+    for name in EXPECTED_MANAGED_FILES:
+        payload = (export_dir / name).read_bytes()
+        assert marker["managed_files"][name] == {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
 
 
 def test_old_static_marker_cannot_authorize_replacement(
@@ -757,7 +820,7 @@ def test_unknown_injected_after_backup_rename_is_restored_and_published_to_sibli
         real_replace(source, target)
         source_path = Path(source)
         target_path = Path(target)
-        if source_path == destination and ".backup-" in target_path.name:
+        if source_path == destination and ".previous-" in target_path.name:
             (target_path / "user-after-rename.txt").write_text(
                 "keep", encoding="utf-8"
             )
@@ -772,30 +835,71 @@ def test_unknown_injected_after_backup_rename_is_restored_and_published_to_sibli
     assert outputs["project_md"].parent == tmp_path / "export-v001"
 
 
-def test_cleanup_probe_never_deletes_unknown_backup_member(
+def test_same_named_file_replaced_after_rename_is_restored_without_data_loss(
     project_path: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     destination = tmp_path / "export"
     export_package(project_path, destination)
-    real_cleanup = exporter._remove_strict_managed_export
-    injected_paths: list[Path] = []
+    real_replace = exporter.os.replace
+    replacement = b"user replaced project.md after rename"
 
-    def injecting_cleanup(path: Path, project_id: str) -> None:
-        sentinel = path / "user-during-cleanup.txt"
-        sentinel.write_text("keep", encoding="utf-8")
-        injected_paths.append(sentinel)
-        real_cleanup(path, project_id)
+    def replacing_after_rename(source: object, target: object) -> None:
+        real_replace(source, target)
+        source_path = Path(source)
+        target_path = Path(target)
+        if source_path == destination and ".previous-" in target_path.name:
+            (target_path / "project.md").write_bytes(replacement)
 
-    monkeypatch.setattr(exporter, "_remove_strict_managed_export", injecting_cleanup)
+    monkeypatch.setattr(exporter.os, "replace", replacing_after_rename)
 
-    with pytest.raises(ExportError, match="unknown export contents"):
-        export_package(project_path, destination)
+    outputs = export_package(project_path, destination)
 
-    assert injected_paths
-    assert injected_paths[0].read_text(encoding="utf-8") == "keep"
-    assert destination.is_dir()
+    assert outputs["project_md"].parent == tmp_path / "export-v001"
+    assert (destination / "project.md").read_bytes() == replacement
+    assert not list(tmp_path.glob(".export.previous-*"))
+
+
+@pytest.mark.parametrize("field", ["sha256", "size"])
+def test_marker_file_record_mismatch_makes_directory_unknown(
+    project_path: Path,
+    tmp_path: Path,
+    field: str,
+) -> None:
+    destination = tmp_path / "export"
+    export_package(project_path, destination)
+    marker_path = destination / MARKER_NAME
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["managed_files"]["project.md"][field] = (
+        "0" * 64 if field == "sha256" else marker["managed_files"]["project.md"][field] + 1
+    )
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in destination.iterdir()}
+
+    outputs = export_package(project_path, destination)
+
+    assert outputs["project_md"].parent == tmp_path / "export-v001"
+    assert {path.name: path.read_bytes() for path in destination.iterdir()} == before
+
+
+def test_repeated_managed_updates_preserve_unique_previous_histories(
+    project_path: Path,
+    tmp_path: Path,
+    valid_project: dict[str, Any],
+) -> None:
+    destination = tmp_path / "export"
+    export_package(project_path, destination)
+    valid_project["analysis"]["world_bible"] = "第二版"
+    _write_formal_project(project_path, valid_project)
+    export_package(project_path, destination)
+    valid_project["analysis"]["world_bible"] = "第三版"
+    _write_formal_project(project_path, valid_project)
+    export_package(project_path, destination)
+
+    previous = sorted(tmp_path.glob(".export.previous-*"))
+    assert len(previous) == 2
+    assert all((path / MARKER_NAME).is_file() for path in previous)
 
 
 def test_unknown_existing_directory_gets_versioned_sibling(

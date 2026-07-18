@@ -610,14 +610,27 @@ def _write_all(data: dict[str, Any], stage: Path) -> dict[str, Path]:
     _write_text(outputs["prompts"], _prompts_text(data))
     _write_json(outputs["media_manifest"], _manifest(data))
     _write_text(outputs["validation_report"], _validation_report(warnings))
-    _write_json(stage / _MARKER_NAME, _expected_marker(data["project"]["project_id"]))
+    managed_files: dict[str, dict[str, object]] = {}
+    for name in _MANAGED_FILES:
+        payload = (stage / name).read_bytes()
+        managed_files[name] = {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+    _write_json(
+        stage / _MARKER_NAME,
+        _expected_marker(data["project"]["project_id"], managed_files),
+    )
     return outputs
 
 
-def _expected_marker(project_id: str) -> dict[str, Any]:
+def _expected_marker(
+    project_id: str,
+    managed_files: dict[str, dict[str, object]],
+) -> dict[str, Any]:
     return {
         **_MARKER_BASE,
-        "managed_files": list(_MANAGED_FILES),
+        "managed_files": managed_files,
         "project_id": project_id,
     }
 
@@ -715,7 +728,47 @@ def _is_managed_export(path: Path, project_id: str) -> bool:
             member_status.st_mode
         ):
             return False
-    return _read_regular_marker(path / _MARKER_NAME) == _expected_marker(project_id)
+    marker = _read_regular_marker(path / _MARKER_NAME)
+    if not isinstance(marker, dict) or set(marker) != {
+        "export_format",
+        "format_version",
+        "managed_files",
+        "project_id",
+    }:
+        return False
+    if (
+        marker.get("export_format") != _MARKER_BASE["export_format"]
+        or marker.get("format_version") != _MARKER_BASE["format_version"]
+        or marker.get("project_id") != project_id
+    ):
+        return False
+    records = marker.get("managed_files")
+    if not isinstance(records, dict) or set(records) != set(_MANAGED_FILES):
+        return False
+    for name in _MANAGED_FILES:
+        record = records.get(name)
+        if not isinstance(record, dict) or set(record) != {"sha256", "size"}:
+            return False
+        expected_checksum = record.get("sha256")
+        expected_size = record.get("size")
+        if (
+            not isinstance(expected_checksum, str)
+            or not _CHECKSUM.fullmatch(expected_checksum)
+            or not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 0
+        ):
+            return False
+        try:
+            member_status = (path / name).lstat()
+            if member_status.st_size != expected_size:
+                return False
+            actual_checksum = _hash_media_without_following_symlinks(path, (name,))
+        except (OSError, _UnsafeMediaPlatformError):
+            return False
+        if actual_checksum != expected_checksum:
+            return False
+    return True
 
 
 def _versioned_sibling(requested: Path) -> Path:
@@ -735,33 +788,13 @@ def _safe_remove_created_directory(path: Path, parent: Path, prefix: str) -> Non
         shutil.rmtree(path)
 
 
-def _remove_strict_managed_export(path: Path, project_id: str) -> None:
-    """Delete only an exact managed whitelist; preserve every unknown member."""
-    if not _is_managed_export(path, project_id):
-        raise ExportError(
-            f"refusing cleanup because unknown export contents are present: {path}"
-        )
-    for name in (*_MANAGED_FILES, _MARKER_NAME):
-        member = path / name
-        try:
-            member_status = member.lstat()
-        except OSError as error:
-            raise ExportError(
-                f"refusing cleanup because unknown export contents are present: {path}"
-            ) from error
-        if stat.S_ISLNK(member_status.st_mode) or not stat.S_ISREG(
-            member_status.st_mode
-        ):
-            raise ExportError(
-                f"refusing cleanup because unknown export contents are present: {path}"
-            )
-        member.unlink()
-    try:
-        path.rmdir()
-    except OSError as error:
-        raise ExportError(
-            f"backup cleanup found unknown export contents and preserved them: {path}"
-        ) from error
+def _history_path(destination: Path, kind: str) -> Path:
+    parent = destination.parent
+    for _attempt in range(100):
+        candidate = parent / f".{destination.name}.{kind}-{uuid.uuid4().hex}"
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    raise ExportError(f"cannot allocate preserved {kind} path for {destination}")
 
 
 def _publish_new(stage: Path, target: Path, project_id: str) -> Path:
@@ -770,9 +803,20 @@ def _publish_new(stage: Path, target: Path, project_id: str) -> Path:
     os.replace(stage, target)
     try:
         _fsync_directory(target.parent)
-    except BaseException:
-        _remove_strict_managed_export(target, project_id)
-        raise
+    except BaseException as error:
+        failed = _history_path(target, "failed")
+        try:
+            os.replace(target, failed)
+            _fsync_directory(target.parent)
+        except BaseException as preserve_error:
+            raise ExportError(
+                "new export publication failed and could not be preserved safely: "
+                + _single_line(preserve_error)
+            ) from preserve_error
+        raise ExportError(
+            f"new export publication failed; failed export preserved at {failed}: "
+            f"{_single_line(error)}"
+        ) from error
     return target
 
 
@@ -780,17 +824,15 @@ def _publish_managed(stage: Path, destination: Path, project_id: str) -> Path:
     parent = destination.parent
     if not _is_managed_export(destination, project_id):
         return _publish_new(stage, _versioned_sibling(destination), project_id)
-    backup = parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
-    if backup.exists() or backup.is_symlink():
-        raise ExportError(f"cannot allocate managed export backup: {backup}")
-    os.replace(destination, backup)
-    if not _is_managed_export(backup, project_id):
+    previous = _history_path(destination, "previous")
+    os.replace(destination, previous)
+    if not _is_managed_export(previous, project_id):
         try:
             if destination.exists() or destination.is_symlink():
                 raise ExportError(
-                    "cannot restore export changed during managed backup verification"
+                    "cannot restore export changed during previous-version verification"
                 )
-            os.replace(backup, destination)
+            os.replace(previous, destination)
             _fsync_directory(parent)
         except BaseException as restore_error:
             raise ExportError(
@@ -803,20 +845,27 @@ def _publish_managed(stage: Path, destination: Path, project_id: str) -> Path:
         os.replace(stage, destination)
         stage_published = True
         _fsync_directory(parent)
-    except BaseException:
+    except BaseException as publication_error:
         try:
             if stage_published:
-                _remove_strict_managed_export(destination, project_id)
-            os.replace(backup, destination)
+                failed = _history_path(destination, "failed")
+                os.replace(destination, failed)
+            else:
+                failed = None
+            os.replace(previous, destination)
             _fsync_directory(parent)
         except BaseException as restore_error:
             raise ExportError(
-                "managed export publication failed and backup restoration also failed: "
+                "managed export publication failed and previous restoration also failed: "
                 + _single_line(restore_error)
-            )
-        raise
-    _remove_strict_managed_export(backup, project_id)
-    _fsync_directory(parent)
+            ) from restore_error
+        preserved = f"; failed export preserved at {failed}" if failed else ""
+        raise ExportError(
+            "managed export publication failed; previous export restored"
+            f"{preserved}: {_single_line(publication_error)}"
+        ) from publication_error
+    # Safety tradeoff: never delete a directory renamed from the user's
+    # destination. The complete prior version remains recoverable at *previous*.
     return destination
 
 
