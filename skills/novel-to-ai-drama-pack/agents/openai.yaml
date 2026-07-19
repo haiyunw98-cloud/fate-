@@ -1,4 +1,4 @@
 interface:
-  display_name: "小说转 AI 短剧素材包"
-  short_description: "生成短剧剧本、资产图片、声音和带 @引用的分镜提示词"
-  default_prompt: "使用 $novel-to-ai-drama-pack 完整读取这部小说，建立统一编号资产库，生成前三集短剧素材包并实际创建核心图片与声音。"
+  display_name: "小说转短剧素材包"
+  short_description: "上传小说，生成任意集数的短剧剧本、图片、声音和 @引用分镜提示词"
+  default_prompt: "使用 $novel-to-ai-drama-pack 完整读取这部小说，建立统一编号资产库，按我确认的集数生成短剧素材包并实际创建核心图片与声音。"

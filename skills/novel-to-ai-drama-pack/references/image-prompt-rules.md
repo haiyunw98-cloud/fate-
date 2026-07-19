@@ -36,9 +36,9 @@
 
 ```text
 style_reference
-→ E001–E003 所有出镜人物的 character_sheet
+→ `script_episode_count` 范围内所有出镜人物的 character_sheet
 → expression_sheet / action_sheet
-→ E001–E003 所有使用场景的 scene_sheet
+→ `script_episode_count` 范围内所有使用场景的 scene_sheet
 → prop_sheet / food_image
 → E001 shot_sample
 ```
@@ -95,7 +95,7 @@ style_reference
 
 ## 人物综合设定图
 
-为每个 `lead` 和 `major` 角色，以及 E001–E003 任一镜头出现的 `minor`/`cameo` 角色，生成一张基础综合设定图。不因为角色在 E002/E003 才首次出场而省略基础图，不把正面、侧面、背面、头像分开生成。
+为每个 `lead` 和 `major` 角色，以及 `script_episode_count` 范围内任一镜头出现的 `minor`/`cameo` 角色，生成一张基础综合设定图。不因为角色在后续集才首次出场而省略基础图，不把正面、侧面、背面、头像分开生成。
 
 使用横向高清角色表，在同一张图中布置：
 
@@ -125,7 +125,7 @@ style_reference
 
 ## 场景综合设定图
 
-为每个 `important` 场景，以及 E001–E003 任一镜头使用的 `secondary` 场景，生成一张 `scene_sheet`。不因为场景在 E002/E003 才首次出现而省略基础图。在同一画板中展示：
+为每个 `important` 场景，以及 `script_episode_count` 范围内任一镜头使用的 `secondary` 场景，生成一张 `scene_sheet`。不因为场景在后续集才首次出现而省略基础图。在同一画板中展示：
 
 - 无人全景/建立镜头。
 - 正向与反向机位、必要的左右视角。

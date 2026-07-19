@@ -439,16 +439,23 @@ def test_only_sample_episodes_require_shot_samples(valid_project: dict[str, Any]
     assert validate_project(valid_project) == []
 
 
-@pytest.mark.parametrize("sample_count", [0, 2, False])
-def test_sample_episode_count_must_be_exactly_one(
+@pytest.mark.parametrize("sample_count", [0, False])
+def test_sample_episode_count_must_be_positive_integer(
     valid_project: dict[str, Any], sample_count: Any
 ) -> None:
     valid_project["generation_settings"]["sample_episode_count"] = sample_count
 
     assert_has_error(
         validate_project(valid_project),
-        "generation_settings.sample_episode_count must be exactly 1",
+        "generation_settings.sample_episode_count must be a positive integer",
     )
+
+
+def test_user_can_request_two_sample_episodes(valid_project: dict[str, Any]) -> None:
+    valid_project["project"]["status"] = "draft"
+    valid_project["generation_settings"]["sample_episode_count"] = 2
+
+    assert validate_project(valid_project) == []
 
 
 def test_target_episode_count_must_equal_episode_count(

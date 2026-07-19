@@ -839,10 +839,10 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
     if (
         not isinstance(sample_count, int)
         or isinstance(sample_count, bool)
-        or sample_count != 1
+        or sample_count <= 0
     ):
         raise MediaJobError(
-            "generation_settings.sample_episode_count must be integer 1"
+            "generation_settings.sample_episode_count must be a positive integer"
         )
     script_count = settings.get("script_episode_count")
     if (
@@ -855,11 +855,15 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         )
 
     assets = _assets(data)
-    first_episode = _validated_first_episode(data)
+    _validated_first_episode(data)
     episodes = data["episodes"]
     if script_count > len(episodes):
         raise MediaJobError(
             "generation_settings.script_episode_count cannot exceed episodes count"
+        )
+    if sample_count > script_count:
+        raise MediaJobError(
+            "generation_settings.sample_episode_count cannot exceed script_episode_count"
         )
     scripted_episodes = episodes[:script_count]
     scripted_character_ids = {
@@ -1187,7 +1191,7 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         important_food_ids=important_food_ids,
     )
 
-    first_episodes = [first_episode]
+    sample_episodes = episodes[:sample_count]
     all_known_tokens = {
         str(asset["reference_token"])
         for asset in [
@@ -1197,7 +1201,7 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         if _nonempty(asset.get("reference_token"))
     }
 
-    for episode in first_episodes:
+    for episode in sample_episodes:
         episode_id = str(episode.get("episode_id", "E001"))
         episode_number = episode.get("episode_number", 1)
         if not isinstance(episode_number, int) or isinstance(episode_number, bool):
@@ -1206,7 +1210,7 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(shots, list):
             raise MediaJobError(f"{episode_id}.shots must be a list")
         for shot_index, shot in enumerate(shots):
-            shot_path = f"episodes[0].shots[{shot_index}]"
+            shot_path = f"episodes[{episode_number - 1}].shots[{shot_index}]"
             shot_id = str(shot.get("shot_id", ""))
             allowed_tokens: set[str] = set()
             shot_dependencies: list[dict[str, Any] | None] = []

@@ -198,8 +198,10 @@ def _validate_generation_settings(
     for field in ("aspect_ratio", "image_provider", "voice_provider"):
         _require_nonempty_string(settings, field, "generation_settings", errors)
     sample_count = settings.get("sample_episode_count")
-    if not _is_integer(sample_count) or sample_count != 1:
-        errors.append("generation_settings.sample_episode_count must be exactly 1")
+    if not _is_integer(sample_count) or sample_count <= 0:
+        errors.append(
+            "generation_settings.sample_episode_count must be a positive integer"
+        )
     script_count = settings.get("script_episode_count")
     if not _is_integer(script_count) or script_count <= 0:
         errors.append(
@@ -622,6 +624,7 @@ def _validate_media_gate(
     props: list[dict[str, Any]],
     foods: list[dict[str, Any]],
     episodes: list[dict[str, Any]],
+    sample_count: object,
     assets: list[dict[str, Any]],
     errors: list[str],
 ) -> None:
@@ -679,7 +682,9 @@ def _validate_media_gate(
             ) not in completed:
                 errors.append(f"missing completed {asset_type} for {owner_id}")
 
-    for episode in episodes[:1]:
+    if not _is_integer(sample_count) or sample_count <= 0:
+        return
+    for episode in episodes[:sample_count]:
         shots = episode.get("shots")
         if not isinstance(shots, list):
             continue
@@ -838,6 +843,14 @@ def validate_project(data: dict[str, Any]) -> list[str]:
         errors.append(
             "generation_settings.sample_episode_count cannot exceed episodes count"
         )
+    if (
+        _is_integer(sample_count)
+        and _is_integer(script_count)
+        and sample_count > script_count
+    ):
+        errors.append(
+            "generation_settings.sample_episode_count cannot exceed script_episode_count"
+        )
     if project_status == "completed" and source is not None and source.get("coverage") != 1:
         errors.append("source.coverage must be 1 when project is completed")
 
@@ -892,6 +905,7 @@ def validate_project(data: dict[str, Any]) -> list[str]:
         props,
         foods,
         episodes,
+        sample_count,
         assets,
         errors,
     )

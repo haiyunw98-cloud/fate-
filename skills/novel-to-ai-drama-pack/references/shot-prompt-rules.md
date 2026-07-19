@@ -62,7 +62,7 @@
 - `prop_ids` 中每个道具必须以 `name@prop_sheet` 出现一次。
 - `food_ids` 中每个菜肴必须以 `name@food_image` 出现一次。
 
-E001–E003 中每个 `character_ids` 人物（包括 `minor`）都必须有基础 `character_sheet`，每个 `scene_id` 场景（包括 `secondary`）都必须有 `scene_sheet`。只要对象在三集提示词出现，就不能以“不是第一集”或“重要性较低”为由省略基础图。
+`script_episode_count` 范围内每个 `character_ids` 人物（包括 `minor`）都必须有基础 `character_sheet`，每个 `scene_id` 场景（包括 `secondary`）都必须有 `scene_sheet`。只要对象在指定集数的提示词出现，就不能以“不是第一集”或“重要性较低”为由省略基础图。
 
 普通小物件只写自然语言，不写入 `prop_ids`，不创建图片资产，不写 `@`。重要物品、武器、信物、证物、车辆、设备和命名菜肴在列入对应 ID 数组后必须有图且在句内引用。
 
@@ -245,7 +245,7 @@ python3 "$SKILL_DIR/scripts/validate_project.py" PROJECT/project.json
 python3 "$SKILL_DIR/scripts/build_media_jobs.py" PROJECT/project.json
 ```
 
-`build_media_jobs.py` 会检查 `script_episode_count` 范围内每一集的句内令牌，并将待生成的活动资产放入依赖图，因此可以在它们尚未 `completed` 时预检；该校验范围不会把 E002/E003 扩大成镜头图或对白任务。当三集提示词引用的基础图都已生成并登记后，再运行：
+`build_media_jobs.py` 会检查 `script_episode_count` 范围内每一集的句内令牌，并将待生成的活动资产放入依赖图，因此可以在它们尚未 `completed` 时预检；该校验范围不会把 E002 及之后的剧集扩大成镜头图或对白任务。当指定集数的提示词引用的基础图都已生成并登记后，再运行：
 
 ```bash
 python3 "$SKILL_DIR/scripts/validate_references.py" PROJECT/project.json

@@ -177,7 +177,7 @@ def test_project_template_has_canonical_shape() -> None:
             "image_provider": "built_in_image_gen",
             "voice_provider": "openai_speech",
             "sample_episode_count": 1,
-            "script_episode_count": 3,
+                "script_episode_count": 1,
         },
         "generation_runs": [],
     }

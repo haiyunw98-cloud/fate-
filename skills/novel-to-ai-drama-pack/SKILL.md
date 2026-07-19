@@ -1,6 +1,6 @@
 ---
 name: novel-to-ai-drama-pack
-description: 将 TXT、Markdown、DOCX、EPUB、PDF 或粘贴的完整小说转换为可生产的 AI 短剧或 AI 漫剧素材包，实际生成人物、场景、重要道具、菜肴图片和主角及主要配角声音，并输出全剧规划、前三集剧本、带句内 @参考图 的分镜提示词及第一集示范画面。用户提出小说转短剧、AI 漫剧、人物场景重要道具或菜肴图片、主要角色声音、前三集素材、带 @资产引用 的分镜提示词或小说视频化素材包时使用；只产出可供视频模型使用的提示词，不生成视频文件。
+description: 将 TXT、Markdown、DOCX、EPUB、PDF 或粘贴的完整小说转换为可生产的 AI 短剧或 AI 漫剧素材包，实际生成人物、场景、重要道具、菜肴图片和主角及主要配角声音，并输出用户指定集数的剧本、带句内 @参考图 的分镜提示词及第一集示范画面。用户提出小说转短剧、AI 漫剧、人物场景重要道具或菜肴图片、主要角色声音、任意集数素材、带 @资产引用 的分镜提示词或小说视频化素材包时使用；只产出可供视频模型使用的提示词，不生成视频文件。
 ---
 
 # 小说转 AI 短剧素材包
@@ -53,7 +53,7 @@ python3 "$SKILL_DIR/scripts/extract_source.py" INPUT --output PROJECT/00_原著�
 
 ### 5. 实际生成有依赖顺序的图片
 
-使用内置图片生成器，按风格参考图 → E001–E003 所有出镜人物（包括 `minor`）的综合设定图 → 主角/主要配角表情与动作多宫格 → E001–E003 所有使用场景（包括 `secondary`）的综合设定图 → 重要道具/菜肴图 → E001 每个镜头一张示范画面的图像链生成实际文件。对每张本地参考图，先用 `view_image` 检查，再把真实本地路径传给图片生成器。`@reference_token` 只标识应附上哪张登记图，不是图片附件。
+使用内置图片生成器，按风格参考图 → `script_episode_count` 范围内所有出镜人物（包括 `minor`）的综合设定图 → 主角/主要配角表情与动作多宫格 → 该范围内所有使用场景（包括 `secondary`）的综合设定图 → 重要道具/菜肴图 → `sample_episode_count` 范围内每个镜头一张示范画面的图像链生成实际文件。对每张本地参考图，先用 `view_image` 检查，再把真实本地路径传给图片生成器。`@reference_token` 只标识应附上哪张登记图，不是图片附件。
 
 生成后用 `view_image` 检查人物身份、身体、构图、字样和场景结构；把选定的最终图复制到工作区的版本化相对路径，登记 `checksum`、`prompt`、`parent_asset_ids` 和生成记录。内置生成失败时保留任务未完成并报告真实错误；不得悄悄改用 API/CLI。
 
@@ -63,13 +63,13 @@ python3 "$SKILL_DIR/scripts/extract_source.py" INPUT --output PROJECT/00_原著�
 
 缺少 `OPENAI_API_KEY` 时运行 dry-run 验证参数，保留声音任务为未完成，并阻止“完整素材包已交付”的声明。不伪造 WAV、校验值或 `completed` 状态。
 
-### 7. 初始包只写三集，只为第一集出图
+### 7. 按用户指定集数写剧本和样片
 
-设置 `script_episode_count = 3` 和 `sample_episode_count = 1`，完整写 E001–E003 剧本与镜头提示词。只为 E001 每个镜头实际生成一张 `shot_sample`；不为 E002/E003 生成分镜图，不生成首帧/关键帧/尾帧三套图，不生成任何视频。
+将 `script_episode_count` 设为用户确认的剧本集数，并令它与 `target_episode_count` 和 `episodes` 数量一致；将 `sample_episode_count` 设为用户确认的样片集数，且不大于 `script_episode_count`。完整写所有指定剧集的剧本与镜头提示词。为前 `sample_episode_count` 集的每个镜头各生成一张 `shot_sample`，并为这些集的每句台词生成音频；其余剧集不生成分镜图或逐句对白音频，不生成首帧/关键帧/尾帧三套图，不生成任何视频。
 
 ### 8. 把完整引用写在句内
 
-对三集的 `prompt_zh` 和 `prompt_en` 都使用相同的注册令牌集。紧跟名称写 `名称@reference_token`，不留空格；不把令牌单独放在开头或引用清单。对每个逻辑阶段选最高 `non-discarded` 版本，覆盖当前集数的 `episode_range` 优先于全局阶段。提示词可先引用尚待生成的活动版本，由媒体依赖排序先完成该资产；正式导出才要求所有引用版本均为 `completed`。普通小物件只用文字。
+对所有指定集数的 `prompt_zh` 和 `prompt_en` 都使用相同的注册令牌集。紧跟名称写 `名称@reference_token`，不留空格；不把令牌单独放在开头或引用清单。对每个逻辑阶段选最高 `non-discarded` 版本，覆盖当前集数的 `episode_range` 优先于全局阶段。提示词可先引用尚待生成的活动版本，由媒体依赖排序先完成该资产；正式导出才要求所有引用版本均为 `completed`。普通小物件只用文字。
 
 每批提示词后运行：
 
@@ -77,7 +77,7 @@ python3 "$SKILL_DIR/scripts/extract_source.py" INPUT --output PROJECT/00_原著�
 python3 "$SKILL_DIR/scripts/build_media_jobs.py" PROJECT/project.json
 ```
 
-让媒体工作单对 `script_episode_count` 范围内全部剧集（初始为 E001–E003）及尚待生成的活动版本做依赖感知的句内引用预检；这不会为 E002/E003 创建镜头图或对白任务。当所有被提示词引用的基础图已完成后，再运行 `python3 "$SKILL_DIR/scripts/validate_references.py" PROJECT/project.json` 要求零错误。任何缺少、错版、多余、重复或未注册 `@` 引用都要在生成示范图前修正；不得为了让待生成活动版本“看起来已完成”而改引旧版。
+让媒体工作单对 `script_episode_count` 范围内全部剧集及尚待生成的活动版本做依赖感知的句内引用预检；只为 `sample_episode_count` 范围内的剧集创建镜头图和对白任务。当所有被提示词引用的基础图已完成后，再运行 `python3 "$SKILL_DIR/scripts/validate_references.py" PROJECT/project.json` 要求零错误。任何缺少、错版、多余、重复或未注册 `@` 引用都要在生成示范图前修正；不得为了让待生成活动版本“看起来已完成”而改引旧版。
 
 ### 9. 分批校验，断点续作，版本不覆盖
 
@@ -113,7 +113,7 @@ from workflow_guard import create_redo_asset, resumable_jobs, transition_asset
 
 ### 10. 零错误且实体媒体验真后才导出
 
-只在项目结构、句内引用、三集范围、必需媒体和待生成任务都返回零错误时，把 `project.status` 设为 `completed`。正式导出会对每个已完成媒体进行受限相对路径、普通文件、拒绝符号链接与物理 SHA-256 匹配校验。文件缺失、哈希不符、声音未完成或尚有媒体任务时不导出、不声称完成。
+只在项目结构、用户指定的全剧集范围、句内引用、必需媒体和待生成任务都返回零错误时，把 `project.status` 设为 `completed`。正式导出会对每个已完成媒体进行受限相对路径、普通文件、拒绝符号链接与物理 SHA-256 匹配校验。文件缺失、哈希不符、声音未完成或尚有媒体任务时不导出、不声称完成。
 
 ```bash
 python3 "$SKILL_DIR/scripts/export_package.py" PROJECT/project.json --output-dir PROJECT/export

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -515,33 +516,38 @@ def test_cli_fails_closed_on_unsafe_media_platform_without_traceback(
     assert not (tmp_path / "export").exists()
 
 
-@pytest.mark.parametrize("script_count", [1, 2, 4])
-def test_formal_export_requires_exactly_three_script_episodes(
+def test_formal_export_supports_user_selected_episode_count(
     project_path: Path,
     tmp_path: Path,
     valid_project: dict[str, Any],
-    script_count: int,
 ) -> None:
-    valid_project["generation_settings"]["script_episode_count"] = script_count
-    project_path.write_text(
-        json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
-    )
+    episode = copy.deepcopy(valid_project["episodes"][-1])
+    episode["episode_id"] = "E004"
+    episode["episode_number"] = 4
+    episode["title"] = "第四集"
+    for shot in episode["shots"]:
+        shot["shot_id"] = shot["shot_id"].replace("E003", "E004")
+    valid_project["episodes"].append(episode)
+    valid_project["project"]["target_episode_count"] = 4
+    valid_project["generation_settings"]["script_episode_count"] = 4
+    _write_formal_project(project_path, valid_project)
 
-    with pytest.raises(ExportError, match="script_episode_count must be exactly 3"):
-        export_package(project_path, tmp_path / "export")
+    outputs = export_package(project_path, tmp_path / "export")
+
+    assert "E004" in outputs["project_md"].read_text(encoding="utf-8")
+    assert "E004" in outputs["prompts"].read_text(encoding="utf-8")
 
 
-def test_formal_export_requires_first_three_canonical_episodes(
+def test_formal_export_requires_script_count_to_cover_all_episodes(
     project_path: Path, tmp_path: Path, valid_project: dict[str, Any]
 ) -> None:
-    valid_project["episodes"] = valid_project["episodes"][:2]
-    valid_project["project"]["target_episode_count"] = 2
+    valid_project["project"]["target_episode_count"] = 3
     valid_project["generation_settings"]["script_episode_count"] = 2
     project_path.write_text(
         json.dumps(valid_project, ensure_ascii=False), encoding="utf-8"
     )
 
-    with pytest.raises(ExportError, match="first three episodes must be E001, E002, E003"):
+    with pytest.raises(ExportError, match="script_episode_count must equal episodes count"):
         export_package(project_path, tmp_path / "export")
 
     assert not (tmp_path / "export").exists()

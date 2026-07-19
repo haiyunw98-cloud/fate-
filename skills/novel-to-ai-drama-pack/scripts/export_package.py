@@ -74,28 +74,40 @@ def _formal_contract_errors(data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     settings = data.get("generation_settings")
     script_count = settings.get("script_episode_count") if isinstance(settings, dict) else None
+    sample_count = settings.get("sample_episode_count") if isinstance(settings, dict) else None
+    episodes = data.get("episodes")
     if (
         not isinstance(script_count, int)
         or isinstance(script_count, bool)
-        or script_count != 3
+        or script_count <= 0
+    ):
+        errors.append("generation_settings.script_episode_count must be a positive integer")
+        return errors
+    if not isinstance(episodes, list):
+        errors.append("episodes must be a list for formal export")
+        return errors
+    if script_count != len(episodes):
+        errors.append(
+            "generation_settings.script_episode_count must equal episodes count for formal export"
+        )
+    if (
+        not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count <= 0
+        or sample_count > script_count
     ):
         errors.append(
-            "generation_settings.script_episode_count must be exactly 3 for formal export"
+            "generation_settings.sample_episode_count must be a positive integer no greater than script_episode_count for formal export"
         )
-
-    episodes = data.get("episodes")
-    expected_ids = ["E001", "E002", "E003"]
-    if not isinstance(episodes, list) or len(episodes) < 3:
-        errors.append("first three episodes must be E001, E002, E003 in canonical order")
-        return errors
+    expected_ids = [f"E{index:03d}" for index in range(1, len(episodes) + 1)]
     actual_ids = [
         episode.get("episode_id") if isinstance(episode, dict) else None
-        for episode in episodes[:3]
+        for episode in episodes
     ]
     if actual_ids != expected_ids:
-        errors.append("first three episodes must be E001, E002, E003 in canonical order")
+        errors.append("episodes must use canonical E001…Ennn order for formal export")
 
-    for index, episode in enumerate(episodes[:3]):
+    for index, episode in enumerate(episodes):
         episode_id = expected_ids[index]
         if not isinstance(episode, dict):
             errors.append(f"{episode_id} must be an object for formal export")
@@ -107,45 +119,46 @@ def _formal_contract_errors(data: dict[str, Any]) -> list[str]:
         if not isinstance(shots, list) or not shots:
             errors.append(f"{episode_id}.shots must be nonempty for formal export")
 
-    first_episode = episodes[0]
-    if not isinstance(first_episode, dict):
-        return errors
-    shots = first_episode.get("shots")
-    if not isinstance(shots, list):
-        return errors
     character_ids = {
         character.get("character_id")
         for character in data.get("characters", [])
         if isinstance(character, dict)
         and isinstance(character.get("character_id"), str)
     } if isinstance(data.get("characters"), list) else set()
-    for shot_index, shot in enumerate(shots):
-        fallback_id = f"E001_SH{shot_index + 1:03d}"
-        shot_id = shot.get("shot_id", fallback_id) if isinstance(shot, dict) else fallback_id
-        if not isinstance(shot, dict):
-            continue
-        if "dialogue_lines" not in shot:
-            errors.append(
-                f"{shot_id}.dialogue_lines must be explicitly present; [] means no dialogue"
-            )
-            continue
-        lines = shot.get("dialogue_lines")
-        if not isinstance(lines, list):
-            errors.append(f"{shot_id}.dialogue_lines must be a list")
-            continue
-        for line_index, line in enumerate(lines):
-            path = f"{shot_id}.dialogue_lines[{line_index}]"
-            if not isinstance(line, dict):
-                errors.append(f"{path} must be an object")
+    if isinstance(sample_count, int) and not isinstance(sample_count, bool):
+        for episode_index, episode in enumerate(episodes[:sample_count]):
+            if not isinstance(episode, dict):
                 continue
-            speaker_id = line.get("speaker_id")
-            text = line.get("text")
-            if not isinstance(speaker_id, str) or not speaker_id.strip():
-                errors.append(f"{path}.speaker_id must be a nonempty string")
-            elif speaker_id not in character_ids:
-                errors.append(f"{path}.speaker_id is unknown: {_single_line(speaker_id)}")
-            if not isinstance(text, str) or not text.strip():
-                errors.append(f"{path}.text must be a nonempty string")
+            shots = episode.get("shots")
+            if not isinstance(shots, list):
+                continue
+            for shot_index, shot in enumerate(shots):
+                fallback_id = f"E{episode_index + 1:03d}_SH{shot_index + 1:03d}"
+                shot_id = shot.get("shot_id", fallback_id) if isinstance(shot, dict) else fallback_id
+                if not isinstance(shot, dict):
+                    continue
+                if "dialogue_lines" not in shot:
+                    errors.append(
+                        f"{shot_id}.dialogue_lines must be explicitly present; [] means no dialogue"
+                    )
+                    continue
+                lines = shot.get("dialogue_lines")
+                if not isinstance(lines, list):
+                    errors.append(f"{shot_id}.dialogue_lines must be a list")
+                    continue
+                for line_index, line in enumerate(lines):
+                    path = f"{shot_id}.dialogue_lines[{line_index}]"
+                    if not isinstance(line, dict):
+                        errors.append(f"{path} must be an object")
+                        continue
+                    speaker_id = line.get("speaker_id")
+                    text = line.get("text")
+                    if not isinstance(speaker_id, str) or not speaker_id.strip():
+                        errors.append(f"{path}.speaker_id must be a nonempty string")
+                    elif speaker_id not in character_ids:
+                        errors.append(f"{path}.speaker_id is unknown: {_single_line(speaker_id)}")
+                    if not isinstance(text, str) or not text.strip():
+                        errors.append(f"{path}.text must be a nonempty string")
     return errors
 
 
@@ -467,8 +480,8 @@ def _project_markdown(data: dict[str, Any], warnings: Sequence[str]) -> str:
             ]
         )
 
-    lines.extend(["## 前三集剧本", ""])
-    for episode in data["episodes"][:3]:
+    lines.extend(["## 全部剧集剧本", ""])
+    for episode in data["episodes"]:
         lines.extend(
             [
                 f"### {episode['episode_id']} 《{episode['title']}》",
@@ -503,7 +516,7 @@ def _project_markdown(data: dict[str, Any], warnings: Sequence[str]) -> str:
 def _shot_rows(data: dict[str, Any]) -> list[list[object]]:
     registered = _registered_tokens(data)
     rows: list[list[object]] = []
-    for episode in data["episodes"][:3]:
+    for episode in data["episodes"]:
         for shot in episode["shots"]:
             rows.append(
                 [
@@ -530,7 +543,7 @@ def _prompts_text(data: dict[str, Any]) -> str:
         "说明：本文件只导出视频提示词，不生成视频。",
         "",
     ]
-    for episode in data["episodes"][:3]:
+    for episode in data["episodes"]:
         lines.extend([f"## {episode['episode_id']} 《{episode['title']}》", ""])
         for shot in episode["shots"]:
             lines.extend(

@@ -80,8 +80,8 @@
 | `aspect_ratio` | non-empty string | `9:16` |
 | `image_provider` | non-empty string | `built_in_image_gen` |
 | `voice_provider` | non-empty string | `openai_speech` |
-| `sample_episode_count` | integer | 必须是 `1` |
-| `script_episode_count` | positive integer | 正式导出必须是 `3` |
+| `sample_episode_count` | positive integer | 不得超过 `script_episode_count` |
+| `script_episode_count` | positive integer | 正式导出必须等于 `target_episode_count` |
 
 `generation_runs` 必须是对象数组。对每次实际生成、失败、dry-run 或重做，记录稳定的 `run_id`、操作、资产身份/版本、输入引用、提示词、结果或错误、状态和时间。当前校验器只强制“每项为对象”，不要把这些审计建议误作额外必填契约。
 
@@ -98,7 +98,7 @@
 - `appearance`：非空的固定外形描述。
 - `voice_profile`：对象，必填非空 `voice`、`tone`、`pace`、`sample_text`。
 
-`lead` 和 `major` 需要综合角色图、表情图、动作图和声音样本。E001–E003 任一镜头出现的 `minor`/`cameo` 也至少需要基础角色图，包括只在 E002/E003 首次出现的角色。当前媒体工作流不为 `minor`/`cameo` 自动生成表情、动作或声音样本；不要在镜头中为它们选择 extra，除非先升级为 `major` 或显式注册并完成匹配当前阶段的附加资产。
+`lead` 和 `major` 需要综合角色图、表情图、动作图和声音样本。`script_episode_count` 范围内任一镜头出现的 `minor`/`cameo` 也至少需要基础角色图，包括只在后续集首次出现的角色。当前媒体工作流不为 `minor`/`cameo` 自动生成表情、动作或声音样本；不要在镜头中为它们选择 extra，除非先升级为 `major` 或显式注册并完成匹配当前阶段的附加资产。
 
 ### `scenes[]`、`props[]`、`foods[]`
 
@@ -108,7 +108,7 @@
 - 道具重要性：`important | secondary`。
 - 菜肴重要性：`important | secondary`。
 - `important` 场景必须有 `scene_sheet`。
-- E001–E003 镜头使用的每个场景都必须有 `scene_sheet`，因此被三集引用的 `secondary` 场景也要建基础图。
+- `script_episode_count` 范围内镜头使用的每个场景都必须有 `scene_sheet`，因此被指定集数引用的 `secondary` 场景也要建基础图。
 - `secondary` 普通物件和普通食物不进入 `prop_ids`/`food_ids`，只在镜头叙事中描述；确实重要时先升级为 `important` 并登记资产。
 - `important` 道具必须有 `prop_sheet`。
 - `important` 菜肴必须有 `food_image`。
@@ -126,7 +126,7 @@
 - `script`：字符串；`production` 和 `completed` 状态下首批指定集必须非空。
 - `shots`：非空镜头数组。
 
-初始包正式导出时，前三项必须依次是 E001、E002、E003，且三集都有非空剧本和镜头。
+正式导出时，所有指定剧集必须从 E001 起连续编号，且每集都有非空剧本和镜头。
 
 ### `shots[]`
 
@@ -140,7 +140,7 @@
 - `prompt_zh`、`prompt_en`、`negative_prompt`：字符串；生产状态必须非空。
 - `expression_asset_id`、`action_asset_id`：必须显式存在，取 `null` 或已完成且属于本镜头角色的对应资产 ID。
 
-E001 每个镜头在正式导出时还必须显式包含 `dialogue_lines`；无对白时写 `[]`，不得省略。每个对白对象必须有已存在的 `speaker_id` 和非空 `text`。为确保三集字段一致，建议 E002/E003 也显式写 `dialogue_lines`，但当前正式门禁只强制 E001。
+前 `sample_episode_count` 集每个镜头在正式导出时还必须显式包含 `dialogue_lines`；无对白时写 `[]`，不得省略。每个对白对象必须有已存在的 `speaker_id` 和非空 `text`。为确保后续剧集字段一致，建议所有剧集也显式写 `dialogue_lines`，但当前正式门禁只强制样片范围。
 
 `shot_size`、`camera`、`camera_height`、`camera_angle`、`camera_movement`、`lens`、`composition` 是可选摄影字段；导出器会把存在的值汇总到 XLSX，不得把它们宣布为当前校验器必填项。
 
@@ -274,10 +274,10 @@ discarded -> 不可变
 1. `validate_project` 零错误。
 2. `validate_references` 零错误。
 3. `project.status = completed` 且 `source.coverage = 1.0`。
-4. `script_episode_count = 3`，前三集为 E001–E003 且剧本/镜头完整。
-5. E001 每个镜头显式有 `dialogue_lines`。
+4. `script_episode_count` 等于 `target_episode_count`，所有指定剧集从 E001 起连续且剧本/镜头完整。
+5. 前 `sample_episode_count` 集每个镜头显式有 `dialogue_lines`。
 6. 不存在待生成的必需媒体任务。
-7. E001–E003 所有镜头人物与场景都有基础图，包括三集才首次出现的 `minor` 人物和 `secondary` 场景；仍只为 E001 生成 `shot_sample`。
+7. `script_episode_count` 范围内所有镜头人物与场景都有基础图，包括后续集首次出现的 `minor` 人物和 `secondary` 场景；为前 `sample_episode_count` 集生成 `shot_sample`。
 8. 每个 `completed` 媒体的相对路径受限在项目内，路径组件和文件都不是符号链接，目标是普通文件。
 9. 现场读取实体文件计算的 SHA-256 与 `checksum` 相同；平台无法安全拒绝符号链接时闭合失败。
 

@@ -1845,6 +1845,30 @@ def test_legal_three_episode_prompts_create_only_e001_shot_and_dialogue_jobs(
     )
 
 
+def test_user_selected_two_episode_sample_creates_e002_shot_and_dialogue_jobs(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["generation_settings"]["sample_episode_count"] = 2
+    valid_project["assets"] = [
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] != "shot_sample"
+    ]
+    valid_project["episodes"][1]["shots"][0]["dialogue_lines"] = [
+        {"speaker_id": "C001", "text": "第二集也要制作样片。"}
+    ]
+
+    jobs = build_media_jobs(valid_project)
+
+    assert [job["owner_id"] for job in jobs if job["kind"] == "shot_sample"] == [
+        "E001_SH001",
+        "E002_SH001",
+    ]
+    assert [job["owner_id"] for job in jobs if job["kind"] == "dialogue_audio"] == [
+        "E002_SH001"
+    ]
+
+
 def test_cli_reports_load_error_without_creating_manifest(tmp_path: Path) -> None:
     project_path = tmp_path / "project.json"
     project_path.write_text("{not json", encoding="utf-8")
