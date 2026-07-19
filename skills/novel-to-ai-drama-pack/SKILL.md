@@ -77,7 +77,7 @@ python3 "$SKILL_DIR/scripts/extract_source.py" INPUT --output PROJECT/00_原著�
 python3 "$SKILL_DIR/scripts/build_media_jobs.py" PROJECT/project.json
 ```
 
-让媒体工作单对 `script_episode_count` 范围内全部剧集（初始为 E001–E003）及尚待生成的活动版本做依赖感知的句内引用预检；这不会为 E002/E003 创建镜头图或对白任务。当所有被提示词引用的基础图已完成后，再运行 `"$SKILL_DIR/scripts/validate_references.py"` 要求零错误。任何缺少、错版、多余、重复或未注册 `@` 引用都要在生成示范图前修正；不得为了让待生成活动版本“看起来已完成”而改引旧版。
+让媒体工作单对 `script_episode_count` 范围内全部剧集（初始为 E001–E003）及尚待生成的活动版本做依赖感知的句内引用预检；这不会为 E002/E003 创建镜头图或对白任务。当所有被提示词引用的基础图已完成后，再运行 `python3 "$SKILL_DIR/scripts/validate_references.py" PROJECT/project.json` 要求零错误。任何缺少、错版、多余、重复或未注册 `@` 引用都要在生成示范图前修正；不得为了让待生成活动版本“看起来已完成”而改引旧版。
 
 ### 9. 分批校验，断点续作，版本不覆盖
 
@@ -96,7 +96,20 @@ python3 "$SKILL_DIR/scripts/validate_references.py" PROJECT/project.json
 
 活动基础图仍为 `pending` 或 `redo` 时，先依赖感知地校验并续作，不把旧的同阶段 `completed` 版本改成当前引用来规避等待。
 
-从 `media-jobs.json` 中第一个 `pending` 或 `redo` 任务续作，跳过已完成版本。使用 `"$SKILL_DIR/scripts/workflow_guard.py"` 的 `transition_asset`、`resumable_jobs` 和 `create_redo_asset` 维护合法状态；已完成资产永不回写。错误只修正命中范围，不重做无关资产。
+从 `media-jobs.json` 中第一个 `pending` 或 `redo` 任务续作，跳过已完成版本。`workflow_guard` 是 Python API，不是 CLI，不可直接执行。由调用它的 Python 程序把已解析的绝对目录 `$SKILL_DIR/scripts` 加入 `sys.path` 后导入：
+
+```python
+import sys
+from pathlib import Path
+
+skill_scripts = Path(SKILL_DIR) / "scripts"  # SKILL_DIR 为当前 Skill 的绝对路径
+sys.path.insert(0, str(skill_scripts))
+
+from project_io import atomic_write_json
+from workflow_guard import create_redo_asset, resumable_jobs, transition_asset
+```
+
+使用这些 API 返回的新对象更新内存中的 canonical 项目，再用 `atomic_write_json(project_path, updated_project)` 原子写回；不要给 `workflow_guard` 添加或假设命令行入口。已完成资产永不回写，错误只修正命中范围，不重做无关资产。
 
 ### 10. 零错误且实体媒体验真后才导出
 
