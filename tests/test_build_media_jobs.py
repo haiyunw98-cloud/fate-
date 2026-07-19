@@ -1086,28 +1086,60 @@ def test_first_episode_dialogue_uses_voice_version_active_for_episode_one(
     assert dialogue["depends_on"] == [voice_job["job_id"]]
 
 
-def test_minor_speaker_gets_dialogue_audio_without_voice_sample_job(
-    valid_project: dict[str, Any],
-) -> None:
+def _add_supporting_speaker(
+    project: dict[str, Any], importance: str = "minor"
+) -> dict[str, str]:
     minor_profile = {
         "voice": "年轻小二声",
         "tone": "热情",
         "pace": "稍快",
         "sample_text": "客官，您的菜齐了。",
     }
-    valid_project["characters"].append(
+    project["characters"].append(
         {
             "character_id": "C002",
             "name": "小二",
-            "importance": "minor",
+            "importance": importance,
             "role": "waiter",
             "appearance": "灰色短打",
             "voice_profile": minor_profile,
         }
     )
-    valid_project["episodes"][0]["shots"][0]["dialogue_lines"] = [
+    project["episodes"][0]["shots"][0]["dialogue_lines"] = [
         {"speaker_id": "C002", "text": "客官，莲花酥来了。"}
     ]
+    return minor_profile
+
+
+def _supporting_voice_sample(
+    *,
+    version: int = 1,
+    status: str = "completed",
+    episode_range: list[int] | None = None,
+) -> dict[str, Any]:
+    asset: dict[str, Any] = {
+        "asset_id": "AUD_C002",
+        "version": version,
+        "asset_type": "voice_sample",
+        "owner_type": "character",
+        "owner_id": "C002",
+        "reference_token": f"@声音_AUD_C002_小二_标准声音_V{version:03d}",
+        "file_name": f"AUD_C002_V{version:03d}.wav",
+        "relative_path": f"assets/audio/AUD_C002_V{version:03d}.wav",
+        "checksum": "a" * 64 if status == "completed" else "",
+        "prompt": "年轻小二声，热情稍快",
+        "parent_asset_ids": [],
+        "status": status,
+    }
+    if episode_range is not None:
+        asset["episode_range"] = episode_range
+    return asset
+
+
+def test_minor_speaker_gets_dialogue_audio_without_voice_sample_job(
+    valid_project: dict[str, Any],
+) -> None:
+    minor_profile = _add_supporting_speaker(valid_project)
 
     jobs = build_media_jobs(valid_project)
     dialogue = _job(jobs, "dialogue_audio", "E001_SH001")
@@ -1117,11 +1149,114 @@ def test_minor_speaker_gets_dialogue_audio_without_voice_sample_job(
         for job in jobs
     )
     assert dialogue["depends_on"] == []
+    assert dialogue["reference_tokens"] == []
     assert dialogue["input"]["voice_profile"] == minor_profile
+    assert dialogue["input"]["voice_asset_id"] is None
+    assert dialogue["input"]["voice_reference_token"] is None
     assert dialogue["input"]["text"] == "客官，莲花酥来了。"
     assert dialogue["input"]["built_in_voice"] == "coral"
     assert 4 <= len(dialogue["input"]["delivery_instructions"]) <= 8
     assert dialogue["input"]["ai_generated"] is True
+
+
+@pytest.mark.parametrize("importance", ["minor", "cameo"])
+def test_explicit_completed_supporting_voice_sample_is_used_without_job(
+    valid_project: dict[str, Any], importance: str
+) -> None:
+    profile = _add_supporting_speaker(valid_project, importance)
+    sample = _supporting_voice_sample(status="completed")
+    valid_project["assets"].append(sample)
+
+    jobs = build_media_jobs(valid_project)
+    dialogue = _job(jobs, "dialogue_audio", "E001_SH001")
+
+    assert not any(
+        job["kind"] == "voice_sample" and job["owner_id"] == "C002"
+        for job in jobs
+    )
+    assert dialogue["depends_on"] == []
+    assert dialogue["reference_tokens"] == [sample["reference_token"]]
+    assert dialogue["input"]["voice_profile"] == profile
+    assert dialogue["input"]["voice_asset_id"] == "AUD_C002"
+    assert dialogue["input"]["voice_reference_token"] == sample["reference_token"]
+
+
+def test_explicit_confirmed_supporting_voice_sample_job_precedes_dialogue(
+    valid_project: dict[str, Any],
+) -> None:
+    profile = _add_supporting_speaker(valid_project)
+    sample = _supporting_voice_sample(status="confirmed")
+    valid_project["assets"].append(sample)
+
+    jobs = build_media_jobs(valid_project)
+    voice_job = _job(jobs, "voice_sample", "C002")
+    dialogue = _job(jobs, "dialogue_audio", "E001_SH001")
+
+    assert voice_job["input"]["voice_profile"] == profile
+    assert voice_job["input"]["sample_text"] == profile["sample_text"]
+    assert len(voice_job["input"]["delivery_instructions"]) == 6
+    assert dialogue["depends_on"] == [voice_job["job_id"]]
+    assert dialogue["reference_tokens"] == [sample["reference_token"]]
+    assert dialogue["input"]["voice_asset_id"] == "AUD_C002"
+
+
+def test_discarded_only_supporting_voice_sample_does_not_create_or_bind_sample(
+    valid_project: dict[str, Any],
+) -> None:
+    _add_supporting_speaker(valid_project)
+    valid_project["assets"].append(
+        _supporting_voice_sample(status="discarded")
+    )
+
+    jobs = build_media_jobs(valid_project)
+    dialogue = _job(jobs, "dialogue_audio", "E001_SH001")
+
+    assert not any(
+        job["kind"] == "voice_sample" and job["owner_id"] == "C002"
+        for job in jobs
+    )
+    assert dialogue["depends_on"] == []
+    assert dialogue["reference_tokens"] == []
+    assert dialogue["input"]["voice_asset_id"] is None
+    assert dialogue["input"]["voice_reference_token"] is None
+
+
+def test_supporting_dialogue_selects_e001_voice_stage_not_future_stage(
+    valid_project: dict[str, Any],
+) -> None:
+    _add_supporting_speaker(valid_project)
+    voice_e001 = _supporting_voice_sample(
+        version=1, status="completed", episode_range=[1, 1]
+    )
+    voice_future = _supporting_voice_sample(
+        version=2, status="completed", episode_range=[2, 3]
+    )
+    valid_project["assets"].extend([voice_e001, voice_future])
+
+    dialogue = _job(build_media_jobs(valid_project), "dialogue_audio", "E001_SH001")
+
+    assert dialogue["reference_tokens"] == [voice_e001["reference_token"]]
+    assert dialogue["input"]["voice_reference_token"] == voice_e001[
+        "reference_token"
+    ]
+    assert voice_future["reference_token"] not in dialogue["reference_tokens"]
+
+
+def test_future_only_supporting_voice_sample_is_not_bound_to_e001_dialogue(
+    valid_project: dict[str, Any],
+) -> None:
+    _add_supporting_speaker(valid_project)
+    future = _supporting_voice_sample(
+        status="completed", episode_range=[2, 3]
+    )
+    valid_project["assets"].append(future)
+
+    dialogue = _job(build_media_jobs(valid_project), "dialogue_audio", "E001_SH001")
+
+    assert dialogue["depends_on"] == []
+    assert dialogue["reference_tokens"] == []
+    assert dialogue["input"]["voice_asset_id"] is None
+    assert dialogue["input"]["voice_reference_token"] is None
 
 
 def test_completed_dialogue_audio_is_not_rebuilt(

@@ -1137,7 +1137,23 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
     characters_by_id = {
         str(character["character_id"]): character for character in all_characters
     }
-    for character in media_characters:
+    default_voice_character_ids = {
+        str(character["character_id"]) for character in media_characters
+    }
+    explicit_supporting_voice_ids = {
+        str(asset.get("owner_id"))
+        for asset in assets
+        if asset.get("asset_type") == "voice_sample"
+        and asset.get("status") != "discarded"
+        and str(asset.get("owner_id")) not in default_voice_character_ids
+    }
+    voice_characters = [
+        character
+        for character in all_characters
+        if str(character["character_id"]) in default_voice_character_ids
+        or str(character["character_id"]) in explicit_supporting_voice_ids
+    ]
+    for character in voice_characters:
         character_id = str(character["character_id"])
         name = str(character.get("name", character_id))
         profile = character.get("voice_profile")
@@ -1361,7 +1377,10 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                     owner_id=speaker_id,
                     episode_number=episode_number,
                 )
-                if speaker_id in voice_assets and voice_asset is None:
+                if (
+                    speaker.get("importance") in {"lead", "major"}
+                    and voice_asset is None
+                ):
                     raise MediaJobError(
                         f"{speaker_id} has no voice_sample active for E001"
                     )
