@@ -70,6 +70,15 @@ def _append_character_version(
     return asset
 
 
+def _replace_in_episode_prompts(
+    project: dict[str, Any], episode_indexes: tuple[int, ...], old: str, new: str
+) -> None:
+    for episode_index in episode_indexes:
+        for field in ("prompt_zh", "prompt_en"):
+            shot = project["episodes"][episode_index]["shots"][0]
+            shot[field] = shot[field].replace(old, new)
+
+
 def test_completed_project_needs_no_media_jobs(
     valid_project: dict[str, Any],
 ) -> None:
@@ -127,12 +136,12 @@ def test_media_jobs_accept_legal_redo_v003_as_active_version(
 ) -> None:
     redone = create_redo_asset(valid_project, "CHAR_C001", "first retry")
     redone = create_redo_asset(redone, "CHAR_C001", "second retry")
-    shot = redone["episodes"][0]["shots"][0]
-    for field in ("prompt_zh", "prompt_en"):
-        shot[field] = shot[field].replace(
-            "@角色_C001_林岚_综合设定图_V001",
-            "@角色_C001_林岚_综合设定图_V003",
-        )
+    _replace_in_episode_prompts(
+        redone,
+        (0, 1, 2),
+        "@角色_C001_林岚_综合设定图_V001",
+        "@角色_C001_林岚_综合设定图_V003",
+    )
     redone["assets"] = [
         asset
         for asset in redone["assets"]
@@ -300,6 +309,12 @@ def test_shot_job_uses_version_active_for_its_episode(
         }
     )
     valid_project["assets"].append(character_v2)
+    _replace_in_episode_prompts(
+        valid_project,
+        (1, 2),
+        "@角色_C001_林岚_综合设定图_V001",
+        "@角色_C001_林岚_综合设定图_V002",
+    )
     for asset in valid_project["assets"]:
         if asset["asset_type"] in {"expression_sheet", "action_sheet"}:
             asset["episode_range"] = [1, 1]
@@ -336,6 +351,12 @@ def test_first_episode_schedules_exact_pending_ranged_character_version(
         }
     )
     valid_project["assets"].append(character_v2)
+    _replace_in_episode_prompts(
+        valid_project,
+        (1, 2),
+        "@角色_C001_林岚_综合设定图_V001",
+        "@角色_C001_林岚_综合设定图_V002",
+    )
     for asset in valid_project["assets"]:
         if asset["asset_type"] in {"expression_sheet", "action_sheet"}:
             asset["episode_range"] = [1, 1]
@@ -399,6 +420,12 @@ def test_expression_versions_bind_only_matching_character_stage(
     )
     action_v1["episode_range"] = [1, 1]
     valid_project["assets"].extend([character_v2, expression_v2])
+    _replace_in_episode_prompts(
+        valid_project,
+        (1, 2),
+        "@角色_C001_林岚_综合设定图_V001",
+        "@角色_C001_林岚_综合设定图_V002",
+    )
     shot = valid_project["episodes"][0]["shots"][0]
     shot["expression_asset_id"] = "EXPR_C001"
     for field in ("prompt_zh", "prompt_en"):
@@ -464,6 +491,7 @@ def test_ambiguous_stage_parent_match_is_rejected(
 def test_character_stage_binds_only_matching_style_version(
     valid_project: dict[str, Any],
 ) -> None:
+    valid_project["generation_settings"]["script_episode_count"] = 1
     style_v1 = next(
         asset
         for asset in valid_project["assets"]
@@ -578,6 +606,12 @@ def test_same_global_stage_schedules_only_latest_character_and_expression_versio
         }
     )
     valid_project["assets"].extend([character_v2, expression_v2])
+    _replace_in_episode_prompts(
+        valid_project,
+        (1, 2),
+        "@角色_C001_林岚_综合设定图_V001",
+        "@角色_C001_林岚_综合设定图_V002",
+    )
     current_shot = valid_project["episodes"][0]["shots"][0]
     current_shot["expression_asset_id"] = "EXPR_C001"
     for field in ("prompt_zh", "prompt_en"):
@@ -630,6 +664,12 @@ def test_ranged_character_stage_overrides_completed_global_stage_for_episode_one
     )
     expression.update({"status": "confirmed", "episode_range": [1, 1]})
     valid_project["assets"].append(character_global)
+    _replace_in_episode_prompts(
+        valid_project,
+        (1, 2),
+        "@角色_C001_林岚_综合设定图_V001",
+        "@角色_C001_林岚_综合设定图_V002",
+    )
     current_shot = valid_project["episodes"][0]["shots"][0]
     current_shot["expression_asset_id"] = "EXPR_C001"
     for field in ("prompt_zh", "prompt_en"):
@@ -820,6 +860,12 @@ def test_ranged_character_extra_can_bind_to_same_ranged_character(
     )
     extra["episode_range"] = [1, 1]
     valid_project["assets"].append(character_global)
+    _replace_in_episode_prompts(
+        valid_project,
+        (1, 2),
+        "@角色_C001_林岚_综合设定图_V001",
+        "@角色_C001_林岚_综合设定图_V002",
+    )
     current_shot = valid_project["episodes"][0]["shots"][0]
     current_shot[field] = asset_id
     for prompt_field in ("prompt_zh", "prompt_en"):
@@ -1571,6 +1617,97 @@ def test_shot_unknown_or_wrong_version_token_is_rejected(
 
     with pytest.raises(MediaJobError, match="unknown reference token|token set"):
         build_media_jobs(valid_project)
+
+
+@pytest.mark.parametrize("episode_index", [1, 2])
+@pytest.mark.parametrize(
+    ("corruption", "expected_error"),
+    [
+        ("unknown", "unknown reference token"),
+        ("wrong_version", "unknown reference token"),
+        ("detached", "reference must immediately follow"),
+        ("duplicate", "detached or duplicate reference token"),
+    ],
+)
+def test_all_scripted_episode_prompts_reject_invalid_inline_character_references(
+    valid_project: dict[str, Any],
+    episode_index: int,
+    corruption: str,
+    expected_error: str,
+) -> None:
+    shot = valid_project["episodes"][episode_index]["shots"][0]
+    token = "@角色_C001_林岚_综合设定图_V001"
+    if corruption == "unknown":
+        for field in ("prompt_zh", "prompt_en"):
+            shot[field] += " @角色_C999_陌生人_综合设定图_V001"
+    elif corruption == "wrong_version":
+        for field in ("prompt_zh", "prompt_en"):
+            shot[field] = shot[field].replace(
+                token, "@角色_C001_林岚_综合设定图_V999"
+            )
+    elif corruption == "detached":
+        for field in ("prompt_zh", "prompt_en"):
+            shot[field] = shot[field].replace(f"林岚{token}", f"{token} 林岚")
+    else:
+        for field in ("prompt_zh", "prompt_en"):
+            shot[field] += f" 游离引用 {token}"
+
+    with pytest.raises(MediaJobError) as exc_info:
+        build_media_jobs(valid_project)
+
+    message = str(exc_info.value)
+    assert f"episodes[{episode_index}].shots[0]" in message
+    assert expected_error in message
+
+
+@pytest.mark.parametrize("episode_index", [1, 2])
+@pytest.mark.parametrize(
+    ("field", "object_id", "expected_error"),
+    [
+        ("prop_ids", "P001", "P001 missing inline reference"),
+        ("food_ids", "F001", "F001 missing inline reference"),
+    ],
+)
+def test_all_scripted_episode_prompts_require_important_prop_and_food_references(
+    valid_project: dict[str, Any],
+    episode_index: int,
+    field: str,
+    object_id: str,
+    expected_error: str,
+) -> None:
+    valid_project["episodes"][episode_index]["shots"][0][field] = [object_id]
+
+    with pytest.raises(MediaJobError) as exc_info:
+        build_media_jobs(valid_project)
+
+    message = str(exc_info.value)
+    assert f"episodes[{episode_index}].shots[0]" in message
+    assert expected_error in message
+
+
+def test_legal_three_episode_prompts_create_only_e001_shot_and_dialogue_jobs(
+    valid_project: dict[str, Any],
+) -> None:
+    valid_project["assets"] = [
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] != "shot_sample"
+    ]
+    for episode in valid_project["episodes"][1:3]:
+        episode["shots"][0]["dialogue_lines"] = [
+            {"speaker_id": "C001", "text": "这句不应进入首集声音任务。"}
+        ]
+
+    jobs = build_media_jobs(valid_project)
+
+    assert [
+        job["owner_id"] for job in jobs if job["kind"] == "shot_sample"
+    ] == ["E001_SH001"]
+    assert not any(
+        job["kind"] in {"shot_sample", "dialogue_audio"}
+        and job.get("episode_id") in {"E002", "E003"}
+        for job in jobs
+    )
 
 
 def test_cli_reports_load_error_without_creating_manifest(tmp_path: Path) -> None:

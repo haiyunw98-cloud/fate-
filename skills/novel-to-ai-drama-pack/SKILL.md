@@ -77,7 +77,7 @@ python3 "$SKILL_DIR/scripts/extract_source.py" INPUT --output PROJECT/00_原著�
 python3 "$SKILL_DIR/scripts/build_media_jobs.py" PROJECT/project.json
 ```
 
-让媒体工作单对尚待生成的活动版本做依赖感知的句内引用预检。当所有被提示词引用的基础图已完成后，再运行 `"$SKILL_DIR/scripts/validate_references.py"` 要求零错误。任何缺少、错版、多余、重复或未注册 `@` 引用都要在生成示范图前修正；不得为了让待生成活动版本“看起来已完成”而改引旧版。
+让媒体工作单对 `script_episode_count` 范围内全部剧集（初始为 E001–E003）及尚待生成的活动版本做依赖感知的句内引用预检；这不会为 E002/E003 创建镜头图或对白任务。当所有被提示词引用的基础图已完成后，再运行 `"$SKILL_DIR/scripts/validate_references.py"` 要求零错误。任何缺少、错版、多余、重复或未注册 `@` 引用都要在生成示范图前修正；不得为了让待生成活动版本“看起来已完成”而改引旧版。
 
 ### 9. 分批校验，断点续作，版本不覆盖
 

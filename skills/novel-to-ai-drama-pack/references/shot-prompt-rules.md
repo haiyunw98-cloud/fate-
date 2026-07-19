@@ -245,7 +245,7 @@ python3 "$SKILL_DIR/scripts/validate_project.py" PROJECT/project.json
 python3 "$SKILL_DIR/scripts/build_media_jobs.py" PROJECT/project.json
 ```
 
-`build_media_jobs.py` 会将待生成的活动资产放入依赖图，因此可以在它们尚未 `completed` 时预检句内令牌。当三集提示词引用的基础图都已生成并登记后，再运行：
+`build_media_jobs.py` 会检查 `script_episode_count` 范围内每一集的句内令牌，并将待生成的活动资产放入依赖图，因此可以在它们尚未 `completed` 时预检；该校验范围不会把 E002/E003 扩大成镜头图或对白任务。当三集提示词引用的基础图都已生成并登记后，再运行：
 
 ```bash
 python3 "$SKILL_DIR/scripts/validate_references.py" PROJECT/project.json

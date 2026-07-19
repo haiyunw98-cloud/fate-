@@ -601,7 +601,8 @@ def _validate_shared_inline_references(
             asset_indexes[identity] = len(raw_assets)
             raw_assets.append(registered)
 
-    validation_data["episodes"] = [validation_data["episodes"][0]]
+    script_count = validation_data["generation_settings"]["script_episode_count"]
+    validation_data["episodes"] = validation_data["episodes"][:script_count]
     for episode in validation_data["episodes"]:
         for shot in episode["shots"]:
             shot["prop_ids"] = [

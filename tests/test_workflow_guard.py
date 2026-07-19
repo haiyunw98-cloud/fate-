@@ -451,12 +451,14 @@ def test_build_media_jobs_selects_redo_as_active_version(
     valid_project: dict[str, Any],
 ) -> None:
     updated = create_redo_asset(valid_project, "CHAR_C001", "fix face")
-    shot = updated["episodes"][0]["shots"][0]
-    for field in ("prompt_zh", "prompt_en"):
-        shot[field] = shot[field].replace(
-            "@角色_C001_林岚_综合设定图_V001",
-            "@角色_C001_林岚_综合设定图_V002",
-        )
+    script_count = updated["generation_settings"]["script_episode_count"]
+    for episode in updated["episodes"][:script_count]:
+        shot = episode["shots"][0]
+        for field in ("prompt_zh", "prompt_en"):
+            shot[field] = shot[field].replace(
+                "@角色_C001_林岚_综合设定图_V001",
+                "@角色_C001_林岚_综合设定图_V002",
+            )
     updated["assets"] = [
         asset
         for asset in updated["assets"]
