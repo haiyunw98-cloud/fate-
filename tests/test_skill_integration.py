@@ -482,6 +482,7 @@ def test_extracts_the_complete_original_novel_fixture() -> None:
     raw = NOVEL_FIXTURE.read_bytes()
     extracted = extract_text(NOVEL_FIXTURE)
 
+    assert extracted == raw.decode("utf-8").rstrip()
     assert extracted.startswith("# 《回声剑宴》")
     assert "## 第一章　雨夜来客" in extracted
     assert "## 第二章　空房回声" in extracted
