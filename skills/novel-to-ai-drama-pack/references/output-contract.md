@@ -98,7 +98,7 @@
 - `appearance`：非空的固定外形描述。
 - `voice_profile`：对象，必填非空 `voice`、`tone`、`pace`、`sample_text`。
 
-`lead` 和 `major` 需要综合角色图、表情图、动作图和声音样本。`minor` 在 E001 出镜时至少需要角色图；当前正式媒体门禁不强制其表情、动作和声音。
+`lead` 和 `major` 需要综合角色图、表情图、动作图和声音样本。E001–E003 任一镜头出现的 `minor`/`cameo` 也至少需要基础角色图，包括只在 E002/E003 首次出现的角色。当前媒体工作流不为 `minor`/`cameo` 自动生成表情、动作或声音样本；不要在镜头中为它们选择 extra，除非先升级为 `major` 或显式注册并完成匹配当前阶段的附加资产。
 
 ### `scenes[]`、`props[]`、`foods[]`
 
@@ -108,9 +108,11 @@
 - 道具重要性：`important | secondary`。
 - 菜肴重要性：`important | secondary`。
 - `important` 场景必须有 `scene_sheet`。
+- E001–E003 镜头使用的每个场景都必须有 `scene_sheet`，因此被三集引用的 `secondary` 场景也要建基础图。
+- `secondary` 普通物件和普通食物不进入 `prop_ids`/`food_ids`，只在镜头叙事中描述；确实重要时先升级为 `important` 并登记资产。
 - `important` 道具必须有 `prop_sheet`。
 - `important` 菜肴必须有 `food_image`。
-- 普通小物件不得为了提示词而人为升级成 `props` 资产。
+- 普通小物件和普通食物不得为了提示词而人为升级成图片资产；不把它们写入镜头 `prop_ids`/`food_ids`，只写自然语言。
 
 ## 剧集与镜头
 
@@ -163,7 +165,26 @@ E001 每个镜头在正式导出时还必须显式包含 `dialogue_lines`；无�
 - `checksum`：该实体文件的 64 位小写 SHA-256。
 - `prompt`：实际生成所用的非空文本。当前字段名是 `prompt`，不是 `generation_prompt`。
 
-可选但被现有流程使用的字段包括 `negative_prompt`、`episode_range`、`redo_parent`、`ai_generated`、`ai_disclosure`、`content_fingerprint`、`speaker_id`、`text`、`line_number`、`language` 和阶段元数据。只在实际需要时写入；不将其中任一项宣布为所有资产的必填字段。
+### 可选 canonical 资产字段
+
+以下字段只在适用资产上写入，不是所有 `assets[]` 的全局必填项。表中“当前校验”说明 `validate_project.py` 或相关现有脚本是否强制其类型/格式。
+
+| 字段 | 建议类型 | 适用资产 | 语义与当前校验 |
+|---|---|---|---|
+| `negative_prompt` | string | 图片资产 | 生成时使用的可验证禁止项；当前项目 validator 不强制存在或类型，workflow redo 会在存在时保留。 |
+| `episode_range` | two-item integer array | 有换装/年龄/状态阶段的资产 | `[start, end]`，两项为正整数且 `start <= end`；阶段选择、引用校验和媒体工作单会强制该格式。 |
+| `redo_parent` | object | 版本 2 及以后的重做资产 | 恰好 `{"asset_id": string, "version": positive integer}`，指向同 `asset_id` 的前一版；当前 validator 强制形状、相邻版本和父版存在。 |
+| `stage` | string（建议非空） | 需要人类可读阶段标签的资产 | 例如 `youth`、`battle_damaged`；当前 validator 不强制存在、枚举或类型，活动范围仍以 `episode_range` 为准。 |
+| `stage_id` | string（建议非空） | 需要稳定阶段标识的资产 | 用于审计和 UI 关联；当前 validator 不强制。 |
+| `stage_name` | string（建议非空） | 需要中文展示名的阶段资产 | 例如“重伤阶段”；当前 validator 不强制。 |
+| `stage_metadata` | object | 需要额外阶段说明的资产 | 保存不参与当前活动选择的说明性元数据；当前 validator 不强制存在或内部形状。 |
+| `ai_generated` | boolean | AI 生成图片和音频 | 标识媒体来源；当前 validator 不强制，声音工作单会在输入中写 `true`。 |
+| `ai_disclosure` | string（建议非空） | 需要对外披露的 AI 媒体，尤其声音 | 保存可对用户展示的 AI 生成说明；当前 validator 不强制。 |
+| `content_fingerprint` | 64-char lowercase hex string | `dialogue_audio` | SHA-256，由 canonical `speaker_id + text` 计算，防止发言人或台词改变后错用旧音频；媒体工作单在字段存在时强制 64 位小写十六进制且与元数据一致。 |
+| `speaker_id` | string（建议 `C\d{3}`） | `dialogue_audio` | 该句对白的发言人；工作单使用它建内容指纹并选择声音档案，当前项目 validator 不单独强制该资产字段。 |
+| `text` | string（建议非空） | `dialogue_audio` | 实际逐句 TTS 文本，应与所属 `dialogue_lines[].text` 及生成 `prompt` 一致；当前项目 validator 不单独强制。 |
+| `line_number` | positive integer | `dialogue_audio` | 当需要显式保留镜头内逐句顺序时使用；当前工作单主要从 `asset_id` 的 `Lnnn` 表达顺序，validator 不强制该字段。 |
+| `language` | string（建议 BCP-47 或稳定项目代码） | 声音或多语图片资产 | 记录内容语言；当前 validator 不强制存在、枚举或类型。 |
 
 ### 资产类型和所属类型
 
@@ -234,6 +255,8 @@ discarded -> 不可变
 4. 同一所属与资产类型的范围不得重叠；多个候选视为歧义并阻断。
 5. 表情或动作图的父角色图必须与该集的活动角色图一致。
 
+活动资产是每个逻辑阶段的最高 `non-discarded` 版本，不是“最高已完成版本”。当它处于 `redo`、`confirmed` 或 `generating` 时，允许提示词预先引用它的注册令牌，媒体工作单会依赖该版本并先生成它。实际作为参考图附件和正式导出时，活动版本必须已有真实文件且为 `completed`；不得为了通过该门禁而回退引用同阶段的旧已完成版本。
+
 ### `redo_parent`
 
 不改写已完成版本。用 `create_redo_asset` 创建连续的下一版，将 `status` 设为 `redo`，清理路径和哈希，并写入：
@@ -254,8 +277,9 @@ discarded -> 不可变
 4. `script_episode_count = 3`，前三集为 E001–E003 且剧本/镜头完整。
 5. E001 每个镜头显式有 `dialogue_lines`。
 6. 不存在待生成的必需媒体任务。
-7. 每个 `completed` 媒体的相对路径受限在项目内，路径组件和文件都不是符号链接，目标是普通文件。
-8. 现场读取实体文件计算的 SHA-256 与 `checksum` 相同；平台无法安全拒绝符号链接时闭合失败。
+7. E001–E003 所有镜头人物与场景都有基础图，包括三集才首次出现的 `minor` 人物和 `secondary` 场景；仍只为 E001 生成 `shot_sample`。
+8. 每个 `completed` 媒体的相对路径受限在项目内，路径组件和文件都不是符号链接，目标是普通文件。
+9. 现场读取实体文件计算的 SHA-256 与 `checksum` 相同；平台无法安全拒绝符号链接时闭合失败。
 
 因缺少 API 凭据而只做了声音 dry-run 时，声音资产不是 `completed`，因此不满足正式导出门禁。
 

@@ -32,7 +32,7 @@
 林岚@角色_C001_林岚_综合设定图_V001推门进入酒楼包厢@场景_S001_酒楼包厢_场景设定图_V001。
 ```
 
-`reference_token` 必须与 `project.json.assets[].reference_token` 中某个已完成资产的值字符级完全相同，不带 `.png`、`.jpg` 或其他扩展名，不使用简写、别名或模糊版本。
+`reference_token` 必须与 `project.json.assets[].reference_token` 中当前活动资产的值字符级完全相同，不带 `.png`、`.jpg` 或其他扩展名，不使用简写、别名或模糊版本。提示词预检阶段允许活动资产尚待生成；实际附图和正式导出时才要求它已完成。
 
 ## 令牌边界
 
@@ -62,6 +62,8 @@
 - `prop_ids` 中每个道具必须以 `name@prop_sheet` 出现一次。
 - `food_ids` 中每个菜肴必须以 `name@food_image` 出现一次。
 
+E001–E003 中每个 `character_ids` 人物（包括 `minor`）都必须有基础 `character_sheet`，每个 `scene_id` 场景（包括 `secondary`）都必须有 `scene_sheet`。只要对象在三集提示词出现，就不能以“不是第一集”或“重要性较低”为由省略基础图。
+
 普通小物件只写自然语言，不写入 `prop_ids`，不创建图片资产，不写 `@`。重要物品、武器、信物、证物、车辆、设备和命名菜肴在列入对应 ID 数组后必须有图且在句内引用。
 
 不添加与镜头无关的注册令牌。每个必需令牌只消费一次；同一令牌的脱离、重复或不相关出现都是错误。
@@ -83,6 +85,8 @@
 
 当前镜头字段各只能选一个表情资产 ID 和一个动作资产 ID。不用没有字段承载的自创多人表情链扩展当前 canonical 契约。
 
+不为 `minor` 或 `cameo` 在镜头中选择 `expression_asset_id` 或 `action_asset_id`，因为当前媒体工作流不保证为它们生成附加图。如果剧情确实需要，先有意识地将角色升级为 `major`，或在 canonical 资产库中显式注册并完成与当前角色阶段匹配的表情/动作资产，然后再选择。
+
 ## 活动版本选择
 
 为镜头选择引用时：
@@ -90,8 +94,10 @@
 1. 只从 `assets` 注册表中选择，不从目录文件名猜测。
 2. 忽略 `discarded`，并对逻辑资产的同一阶段取最高版本。
 3. 如果存在覆盖当前 `episode_number` 的 `episode_range`，选该范围版本；否则选无范围的全局版本。
-4. 令牌必须来自已完成版本。最新版本仍处于 `redo`、`confirmed` 或 `generating` 时，不用旧版假装新阶段已完成。
+4. 把选中的最高 `non-discarded` 版本视为活动版本。它可以是 `redo`、`confirmed` 或 `generating`；提示词使用该活动版本的预注册令牌，媒体工作单通过依赖确保在子资产前生成它。不得回退引用同阶段的旧 `completed` 版本。
 5. 对重叠范围、多个全局候选或父资产歧义立即停止，不随机选择。
+
+只在实际调用图片生成器附上参考图或进入正式导出时，才要求活动资产已有真实文件且为 `completed`。对尚待生成的活动版本，先建任务和提示词，再按拓扑顺序完成媒体。
 
 重做资产必须使用新 `_VNNN` 令牌。当新版本成为活动版本后，更新受影响的提示词与示范图父资产，不改写已完成资产的历史记录。
 
@@ -235,13 +241,19 @@ EN: Lin Lan@character_C001_LinLan_sheet_V001 stands in the room.
 完成每批镜头后运行：
 
 ```bash
-python3 scripts/validate_project.py PROJECT/project.json
-python3 scripts/validate_references.py PROJECT/project.json
+python3 "$SKILL_DIR/scripts/validate_project.py" PROJECT/project.json
+python3 "$SKILL_DIR/scripts/build_media_jobs.py" PROJECT/project.json
+```
+
+`build_media_jobs.py` 会将待生成的活动资产放入依赖图，因此可以在它们尚未 `completed` 时预检句内令牌。当三集提示词引用的基础图都已生成并登记后，再运行：
+
+```bash
+python3 "$SKILL_DIR/scripts/validate_references.py" PROJECT/project.json
 ```
 
 然后确认：
 
-1. 所有对象 ID 已存在，所有所需图片是当前集的活动已完成版本。
+1. 所有对象 ID 已存在，每个所需图片都选中当前集的唯一活动版本；待生成版本已建依赖任务，实际附图和正式导出前已完成。
 2. 每个名称紧跟精确令牌，没有空格、错版、脱离、重复、无关或未知令牌。
 3. 中英文令牌集完全相同。
 4. 普通小物件没有误入引用链，重要物品和菜肴没有遗漏。

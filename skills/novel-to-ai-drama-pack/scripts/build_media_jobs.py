@@ -843,17 +843,34 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         raise MediaJobError(
             "generation_settings.sample_episode_count must be integer 1"
         )
+    script_count = settings.get("script_episode_count")
+    if (
+        not isinstance(script_count, int)
+        or isinstance(script_count, bool)
+        or script_count <= 0
+    ):
+        raise MediaJobError(
+            "generation_settings.script_episode_count must be a positive integer"
+        )
 
     assets = _assets(data)
     first_episode = _validated_first_episode(data)
-    sample_character_ids = {
+    episodes = data["episodes"]
+    if script_count > len(episodes):
+        raise MediaJobError(
+            "generation_settings.script_episode_count cannot exceed episodes count"
+        )
+    scripted_episodes = episodes[:script_count]
+    scripted_character_ids = {
         str(character_id)
-        for shot in first_episode["shots"]
+        for episode in scripted_episodes
+        for shot in episode["shots"]
         for character_id in shot["character_ids"]
     }
-    sample_scene_ids = {
+    scripted_scene_ids = {
         str(shot["scene_id"])
-        for shot in first_episode["shots"]
+        for episode in scripted_episodes
+        for shot in episode["shots"]
     }
     jobs: list[dict[str, Any]] = []
     requirement_assets: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1006,7 +1023,7 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         character
         for character in all_characters
         if character.get("importance") in {"lead", "major"}
-        or str(character.get("character_id")) in sample_character_ids
+        or str(character.get("character_id")) in scripted_character_ids
     ]
     character_assets: dict[str, list[dict[str, Any]]] = {}
     for character in visual_characters:
@@ -1054,7 +1071,7 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
     for scene in all_scenes:
         if (
             scene.get("importance") != "important"
-            and str(scene.get("scene_id")) not in sample_scene_ids
+            and str(scene.get("scene_id")) not in scripted_scene_ids
         ):
             continue
         scene_id = str(scene["scene_id"])

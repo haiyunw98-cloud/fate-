@@ -279,7 +279,15 @@ Delivery: 不加词，不改台词。" \
   --dry-run
 ```
 
-批量 JSONL 的每行至少写 `input`、`voice`、`instructions`、`response_format` 和 `out`，然后运行：
+批量 JSONL 的每行至少写 `input`、`voice`、`instructions`、`response_format` 和 `out`。当命令使用 `--out-dir PROJECT/assets/audio/dialogue` 时，每行 `out` 只写文件基名，不再写 `assets/audio/dialogue/...`，避免在输出目录下重复嵌套路径。
+
+一条完整 JSONL 例子（整个对象在同一行）：
+
+```json
+{"input":"剑为什么会在这里？","voice":"coral","instructions":"Voice Affect: 清亮且紧绷。\nTone: 警觉，不模仿任何真人。\nPacing: 中速，问句前短暂停顿。\nEmotion: 由疑惑转为不安。\nPronunciation: 清楚读准人名和专名。\nDelivery: 不加词，不改写原台词。","response_format":"wav","out":"DIALOGUE_E001_SH001_L001_V001.wav"}
+```
+
+然后运行：
 
 ```bash
 python3 "$TTS_GEN" speak-batch \

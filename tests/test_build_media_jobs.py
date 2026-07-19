@@ -885,6 +885,70 @@ def test_secondary_props_foods_and_scenes_do_not_create_jobs(
     assert not any(job["owner_id"] in {"S002", "P002", "F002"} for job in jobs)
 
 
+@pytest.mark.parametrize(
+    ("episode_index", "importance"), [(1, "minor"), (2, "cameo")]
+)
+def test_later_script_episode_first_appearance_gets_base_character_and_scene_jobs(
+    valid_project: dict[str, Any], episode_index: int, importance: str
+) -> None:
+    valid_project["characters"].append(
+        {
+            "character_id": "C002",
+            "name": "苏禾",
+            "importance": importance,
+            "role": "witness",
+            "appearance": "灰衣短发，眼神警觉",
+            "voice_profile": {
+                "voice": "自然青年声",
+                "tone": "警惕",
+                "pace": "中速",
+                "sample_text": "我只看见他进了旧巷。",
+            },
+        }
+    )
+    valid_project["scenes"].append(
+        {"scene_id": "S002", "name": "旧巷", "importance": "secondary"}
+    )
+    shot = valid_project["episodes"][episode_index]["shots"][0]
+    shot.update(
+        {
+            "character_ids": ["C002"],
+            "scene_id": "S002",
+            "prop_ids": [],
+            "food_ids": [],
+            "prompt_zh": (
+                "苏禾@角色_C002_苏禾_综合设定图_V001走进"
+                "旧巷@场景_S002_旧巷_场景设定图_V001。"
+            ),
+            "prompt_en": (
+                "苏禾@角色_C002_苏禾_综合设定图_V001 enters "
+                "旧巷@场景_S002_旧巷_场景设定图_V001."
+            ),
+            "negative_prompt": "换脸，场景结构变化",
+            "expression_asset_id": None,
+            "action_asset_id": None,
+        }
+    )
+    valid_project["assets"] = [
+        asset
+        for asset in valid_project["assets"]
+        if asset["asset_type"] != "shot_sample"
+    ]
+
+    jobs = build_media_jobs(valid_project)
+
+    assert _job(jobs, "character_sheet", "C002")
+    assert _job(jobs, "scene_sheet", "S002")
+    assert not any(
+        job["owner_id"] == "C002"
+        and job["kind"] in {"expression_sheet", "action_sheet", "voice_sample"}
+        for job in jobs
+    )
+    assert [
+        job["owner_id"] for job in jobs if job["kind"] == "shot_sample"
+    ] == ["E001_SH001"]
+
+
 def test_voice_job_carries_exact_profile_text_builtin_voice_and_directions(
     valid_project: dict[str, Any],
 ) -> None:
