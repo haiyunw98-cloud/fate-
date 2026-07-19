@@ -1,4 +1,6 @@
+import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,7 @@ def test_smoke_project_plans_only_the_five_real_images_and_one_voice_sample():
     assert project["project"] == {
         "project_id": "PRJ900",
         "title": "听雨楼",
-        "status": "completed",
+        "status": "production",
         "target_episode_count": 3,
     }
     assets = project["assets"]
@@ -33,14 +35,11 @@ def test_smoke_project_plans_only_the_five_real_images_and_one_voice_sample():
     ]
     image_assets = [asset for asset in assets if asset["asset_type"] != "voice_sample"]
     assert len(image_assets) == 5
-    assert all(asset["status"] in {"confirmed", "completed"} for asset in image_assets)
+    assert all(asset["status"] == "completed" for asset in image_assets)
     for asset in image_assets:
         path = PROJECT_PATH.parent / asset["relative_path"]
-        if asset["status"] == "completed":
-            assert path.is_file()
-            assert len(asset["checksum"]) == 64
-        else:
-            assert "checksum" not in asset
+        assert path.is_file()
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == asset["checksum"]
     voice = next(asset for asset in assets if asset["asset_type"] == "voice_sample")
     assert voice["status"] == "confirmed"
     assert "checksum" not in voice
@@ -128,9 +127,23 @@ def test_smoke_formal_export_is_blocked_only_by_the_unfinished_voice(tmp_path: P
     assert [(job["job_id"], job["asset_id"], job["kind"]) for job in jobs] == [
         ("JOB_AUD_C001_V001", "AUD_C001", "voice_sample")
     ]
+    delivery_project = tmp_path / "sample-drama"
+    delivery_project.mkdir()
+    project["project"]["status"] = "completed"
+    for asset in project["assets"]:
+        if asset["asset_type"] == "voice_sample":
+            continue
+        source = PROJECT_PATH.parent / asset["relative_path"]
+        destination = delivery_project / asset["relative_path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    delivery_path = delivery_project / "project.json"
+    delivery_path.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+
     with pytest.raises(ExportError) as caught:
-        export_package(PROJECT_PATH, tmp_path / "export")
-    message = str(caught.value)
-    assert "formal export has pending required media jobs: JOB_AUD_C001_V001" in message
-    assert "missing completed" not in message
+        export_package(delivery_path, tmp_path / "export")
+    assert str(caught.value) == (
+        "project validation failed:\n"
+        "formal export has pending required media jobs: JOB_AUD_C001_V001"
+    )
     assert not (tmp_path / "export").exists()
