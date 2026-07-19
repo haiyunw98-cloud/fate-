@@ -1,7 +1,12 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from build_media_jobs import build_media_jobs
+from export_package import ExportError, export_package
+from validate_project import validate_project
+from validate_references import validate_references
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,3 +117,20 @@ def test_smoke_project_records_credentialless_voice_dry_run_without_fake_audio()
             "output_created": False,
         }
     ]
+
+
+def test_smoke_formal_export_is_blocked_only_by_the_unfinished_voice(tmp_path: Path):
+    project = json.loads(PROJECT_PATH.read_text(encoding="utf-8"))
+
+    assert validate_project(project) == []
+    assert validate_references(project) == []
+    jobs = build_media_jobs(project)
+    assert [(job["job_id"], job["asset_id"], job["kind"]) for job in jobs] == [
+        ("JOB_AUD_C001_V001", "AUD_C001", "voice_sample")
+    ]
+    with pytest.raises(ExportError) as caught:
+        export_package(PROJECT_PATH, tmp_path / "export")
+    message = str(caught.value)
+    assert "formal export has pending required media jobs: JOB_AUD_C001_V001" in message
+    assert "missing completed" not in message
+    assert not (tmp_path / "export").exists()
