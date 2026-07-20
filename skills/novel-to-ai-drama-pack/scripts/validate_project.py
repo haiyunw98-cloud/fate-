@@ -207,6 +207,17 @@ def _validate_generation_settings(
         errors.append(
             "generation_settings.script_episode_count must be a positive integer"
         )
+    voice_enabled = settings.get("generate_voice", True)
+    if not isinstance(voice_enabled, bool):
+        errors.append("generation_settings.generate_voice must be a boolean")
+    sample_images_per_episode = settings.get("sample_images_per_episode")
+    if sample_images_per_episode is not None and (
+        not _is_integer(sample_images_per_episode)
+        or sample_images_per_episode < 0
+    ):
+        errors.append(
+            "generation_settings.sample_images_per_episode must be a nonnegative integer or null"
+        )
     return settings
 
 
@@ -625,6 +636,8 @@ def _validate_media_gate(
     foods: list[dict[str, Any]],
     episodes: list[dict[str, Any]],
     sample_count: object,
+    sample_images_per_episode: object,
+    voice_enabled: object,
     assets: list[dict[str, Any]],
     errors: list[str],
 ) -> None:
@@ -657,12 +670,14 @@ def _validate_media_gate(
         owner_id = character.get("character_id")
         if not isinstance(owner_id, str):
             continue
-        for asset_type in (
+        required_asset_types = (
             "character_sheet",
             "expression_sheet",
             "action_sheet",
-            "voice_sample",
-        ):
+        )
+        if voice_enabled is not False:
+            required_asset_types += ("voice_sample",)
+        for asset_type in required_asset_types:
             if (asset_type, "character", owner_id) not in completed:
                 errors.append(f"missing completed {asset_type} for {owner_id}")
 
@@ -688,7 +703,14 @@ def _validate_media_gate(
         shots = episode.get("shots")
         if not isinstance(shots, list):
             continue
-        for shot in shots:
+        selected_shots = (
+            [shot for shot in shots if isinstance(shot, dict) and shot.get("sample_image")]
+            if _is_integer(sample_images_per_episode)
+            else shots
+        )
+        if _is_integer(sample_images_per_episode) and not selected_shots:
+            selected_shots = shots[:sample_images_per_episode]
+        for shot in selected_shots:
             if not isinstance(shot, dict):
                 continue
             shot_id = shot.get("shot_id")
@@ -906,6 +928,8 @@ def validate_project(data: dict[str, Any]) -> list[str]:
         foods,
         episodes,
         sample_count,
+        settings.get("sample_images_per_episode") if settings else None,
+        settings.get("generate_voice", True) if settings else True,
         assets,
         errors,
     )

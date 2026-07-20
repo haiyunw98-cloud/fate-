@@ -479,6 +479,23 @@ def _check_prompt(
         if matching_indices is not None:
             consumed.update(matching_indices)
             continue
+        # 中文提示词必须严格采用“角色名@资产”的句内引用。英文提示词
+        # 可以把资产令牌紧贴在英文译名后；令牌本身仍须精确、唯一且属于
+        # 本镜头，避免为了翻译又复制一套中文名字。
+        if prompt_path.endswith(".prompt_en"):
+            token_index = next(
+                (
+                    index
+                    for index, occurrence in enumerate(occurrences)
+                    if index not in consumed
+                    and occurrence.known
+                    and occurrence.token == base_token
+                ),
+                None,
+            )
+            if token_index is not None:
+                consumed.add(token_index)
+                continue
         if base_token not in known_values:
             same_owner_tokens = [
                 token

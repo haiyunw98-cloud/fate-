@@ -53,19 +53,19 @@ python3 "$SKILL_DIR/scripts/extract_source.py" INPUT --output PROJECT/00_原著�
 
 ### 5. 实际生成有依赖顺序的图片
 
-使用内置图片生成器，按风格参考图 → `script_episode_count` 范围内所有出镜人物（包括 `minor`）的综合设定图 → 主角/主要配角表情与动作多宫格 → 该范围内所有使用场景（包括 `secondary`）的综合设定图 → 重要道具/菜肴图 → `sample_episode_count` 范围内每个镜头一张示范画面的图像链生成实际文件。对每张本地参考图，先用 `view_image` 检查，再把真实本地路径传给图片生成器。`@reference_token` 只标识应附上哪张登记图，不是图片附件。
+使用内置图片生成器，按风格参考图 → `script_episode_count` 范围内所有出镜人物（包括 `minor`）的综合设定图 → 主角/主要配角表情与动作多宫格 → 该范围内所有使用场景（包括 `secondary`）的综合设定图 → 重要道具/菜肴图 → 样片图的图像链生成实际文件。`sample_images_per_episode` 省略时，前 `sample_episode_count` 集每个镜头各生成一张；指定为非负整数时，每集只生成显式标记 `sample_image: true` 的等量镜头图。对每张本地参考图，先用 `view_image` 检查，再把真实本地路径传给图片生成器。`@reference_token` 只标识应附上哪张登记图，不是图片附件。
 
 生成后用 `view_image` 检查人物身份、身体、构图、字样和场景结构；把选定的最终图复制到工作区的版本化相对路径，登记 `checksum`、`prompt`、`parent_asset_ids` 和生成记录。内置生成失败时保留任务未完成并报告真实错误；不得悄悄改用 API/CLI。
 
-### 6. 生成主要角色声音和 E001 逐句对白
+### 6. 可选生成主要角色声音和逐句对白
 
-为每个 `lead` 或 `major` 角色生成约 20 秒的内置 AI 声线样音，再按 E001 的 `dialogue_lines` 每句一个文件生成完整对白音频。使用已安装的 speech Skill CLI，不写临时 SDK 脚本，不克隆或模仿真人声音，并在交付中明示“AI 生成声音”。
+默认情况下，为每个 `lead` 或 `major` 角色生成约 20 秒的内置 AI 声线样音，并按样片集的 `dialogue_lines` 每句一个文件生成完整对白音频。使用已安装的 speech Skill CLI，不写临时 SDK 脚本，不克隆或模仿真人声音，并在交付中明示“AI 生成声音”。当用户明确“不需要声音”或“不需要逐句声音”时，将 `generation_settings.generate_voice` 设为 `false`，跳过声线样音和逐句对白，不把音频列为交付门禁。
 
 缺少 `OPENAI_API_KEY` 时运行 dry-run 验证参数，保留声音任务为未完成，并阻止“完整素材包已交付”的声明。不伪造 WAV、校验值或 `completed` 状态。
 
 ### 7. 按用户指定集数写剧本和样片
 
-将 `script_episode_count` 设为用户确认的剧本集数，并令它与 `target_episode_count` 和 `episodes` 数量一致；将 `sample_episode_count` 设为用户确认的样片集数，且不大于 `script_episode_count`。完整写所有指定剧集的剧本与镜头提示词。为前 `sample_episode_count` 集的每个镜头各生成一张 `shot_sample`，并为这些集的每句台词生成音频；其余剧集不生成分镜图或逐句对白音频，不生成首帧/关键帧/尾帧三套图，不生成任何视频。
+将 `script_episode_count` 设为用户确认的剧本集数，并令它与 `target_episode_count` 和 `episodes` 数量一致；将 `sample_episode_count` 设为用户确认的样片集数，且不大于 `script_episode_count`。完整写所有指定剧集的剧本与镜头提示词。`sample_images_per_episode` 省略时，为前 `sample_episode_count` 集的每个镜头各生成一张 `shot_sample`；指定数值时，每个样片集只生成明确标注 `sample_image: true` 的等量镜头图。仅在 `generate_voice=true` 时，为样片集的台词生成逐句音频；其余剧集不生成分镜图或逐句对白音频，不生成首帧/关键帧/尾帧三套图，不生成任何视频。
 
 ### 8. 把完整引用写在句内
 

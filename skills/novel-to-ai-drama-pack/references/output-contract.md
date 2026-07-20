@@ -82,6 +82,8 @@
 | `voice_provider` | non-empty string | `openai_speech` |
 | `sample_episode_count` | positive integer | 不得超过 `script_episode_count` |
 | `script_episode_count` | positive integer | 正式导出必须等于 `target_episode_count` |
+| `sample_images_per_episode` | nonnegative integer or omitted | 省略时样片集每个镜头各一张；指定数值时，每集仅生成标记 `sample_image: true` 的等量镜头图 |
+| `generate_voice` | boolean or omitted | 默认 `true`；设为 `false` 时不生成角色声音样本或逐句对白音频 |
 
 `generation_runs` 必须是对象数组。对每次实际生成、失败、dry-run 或重做，记录稳定的 `run_id`、操作、资产身份/版本、输入引用、提示词、结果或错误、状态和时间。当前校验器只强制“每项为对象”，不要把这些审计建议误作额外必填契约。
 
@@ -141,6 +143,8 @@
 - `expression_asset_id`、`action_asset_id`：必须显式存在，取 `null` 或已完成且属于本镜头角色的对应资产 ID。
 
 前 `sample_episode_count` 集每个镜头在正式导出时还必须显式包含 `dialogue_lines`；无对白时写 `[]`，不得省略。每个对白对象必须有已存在的 `speaker_id` 和非空 `text`。为确保后续剧集字段一致，建议所有剧集也显式写 `dialogue_lines`，但当前正式门禁只强制样片范围。
+
+中文 `prompt_zh` 的资产引用必须严格写成 `角色名@角色图`、`场景名@场景图`。英文 `prompt_en` 可以使用英文译名紧贴同一个已登记令牌，例如 `Chen Budu@角色_C001_陈不渡_综合设定图_V001`；令牌仍必须与中文提示词完全一致。
 
 `shot_size`、`camera`、`camera_height`、`camera_angle`、`camera_movement`、`lens`、`composition` 是可选摄影字段；导出器会把存在的值汇总到 XLSX，不得把它们宣布为当前校验器必填项。
 

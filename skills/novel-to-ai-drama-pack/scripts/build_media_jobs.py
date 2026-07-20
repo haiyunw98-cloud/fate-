@@ -865,6 +865,18 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         raise MediaJobError(
             "generation_settings.sample_episode_count cannot exceed script_episode_count"
         )
+    voice_enabled = settings.get("generate_voice", True)
+    if not isinstance(voice_enabled, bool):
+        raise MediaJobError("generation_settings.generate_voice must be a boolean")
+    sample_images_per_episode = settings.get("sample_images_per_episode")
+    if sample_images_per_episode is not None and (
+        not isinstance(sample_images_per_episode, int)
+        or isinstance(sample_images_per_episode, bool)
+        or sample_images_per_episode < 0
+    ):
+        raise MediaJobError(
+            "generation_settings.sample_images_per_episode must be a nonnegative integer or null"
+        )
     scripted_episodes = episodes[:script_count]
     scripted_character_ids = {
         str(character_id)
@@ -1157,7 +1169,7 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         if str(character["character_id"]) in default_voice_character_ids
         or str(character["character_id"]) in explicit_supporting_voice_ids
     ]
-    for character in voice_characters:
+    for character in voice_characters if voice_enabled else []:
         character_id = str(character["character_id"])
         name = str(character.get("name", character_id))
         profile = character.get("voice_profile")
@@ -1209,7 +1221,20 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
         shots = episode.get("shots", [])
         if not isinstance(shots, list):
             raise MediaJobError(f"{episode_id}.shots must be a list")
-        for shot_index, shot in enumerate(shots):
+        selected_shots = (
+            [shot for shot in shots if isinstance(shot, dict) and shot.get("sample_image")]
+            if sample_images_per_episode is not None
+            else shots
+        )
+        if sample_images_per_episode is not None:
+            if not selected_shots:
+                selected_shots = shots[:sample_images_per_episode]
+            if len(selected_shots) != sample_images_per_episode:
+                raise MediaJobError(
+                    f"{episode_id} requires exactly {sample_images_per_episode} sample_image shots"
+                )
+        for shot in selected_shots:
+            shot_index = shots.index(shot)
             shot_path = f"episodes[{episode_number - 1}].shots[{shot_index}]"
             shot_id = str(shot.get("shot_id", ""))
             allowed_tokens: set[str] = set()
@@ -1352,6 +1377,8 @@ def build_media_jobs(data: dict[str, Any]) -> list[dict[str, Any]]:
                 episode_id=episode_id,
             )
 
+            if not voice_enabled:
+                continue
             for line_number, line in enumerate(_dialogue_lines(shot), start=1):
                 speaker_id = line["speaker_id"]
                 if speaker_id not in characters_by_id:
